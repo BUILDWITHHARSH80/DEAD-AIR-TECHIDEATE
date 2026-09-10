@@ -1,8 +1,19 @@
 
 import os, jwt, hashlib, hmac, base64
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
 
-SECRET = os.getenv("DEAD_AIR_SECRET", "change-this-secret-in-production")
+# Load from backend directory and current working directory
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+load_dotenv()
+
+SECRET = os.getenv("DEAD_AIR_SECRET")
+if not SECRET:
+    raise RuntimeError(
+        "DEAD_AIR_SECRET environment variable is strictly required. "
+        "Please define DEAD_AIR_SECRET in your environment or .env file."
+    )
 ALGO = "HS256"
 
 # PBKDF2 is used here instead of passlib/bcrypt so the backend works cleanly
