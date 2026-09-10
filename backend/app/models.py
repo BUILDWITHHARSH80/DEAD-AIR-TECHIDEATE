@@ -4,16 +4,19 @@ from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from .database import Base
 
+
 def utc_now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 class Event(Base):
     __tablename__ = "events"
     id = Column(Integer, primary_key=True)
     name = Column(String, default="DEAD AIR")
-    status = Column(String, default="not_started")  # not_started/running/paused/ended
+    status = Column(String, default="not_started")   # not_started / running / paused / ended
     started_at = Column(DateTime, nullable=True)
     duration_seconds = Column(Integer, default=3600)
+
 
 class Team(Base):
     __tablename__ = "teams"
@@ -29,6 +32,7 @@ class Team(Base):
     submitted = Column(Boolean, index=True, default=False)
     created_at = Column(DateTime, default=utc_now)
 
+
 class Challenge(Base):
     __tablename__ = "challenges"
     id = Column(Integer, primary_key=True)
@@ -36,11 +40,12 @@ class Challenge(Base):
     code = Column(String)
     name = Column(String)
     challenge_type = Column(String)
-    prompt = Column(Text)
-    answer = Column(String)
+    prompt = Column(Text)          # Station description (no on-screen riddle needed)
+    answer = Column(String)        # 4-digit passkey
     points = Column(Integer, default=100)
     enabled = Column(Boolean, index=True, default=True)
     evidence_filename = Column(String, nullable=True)
+
 
 class Attempt(Base):
     __tablename__ = "attempts"
@@ -58,22 +63,25 @@ class Attempt(Base):
         Index("ix_attempts_team_correct", "team_id", "correct"),
     )
 
+
 class Unlock(Base):
     __tablename__ = "unlocks"
     id = Column(Integer, primary_key=True)
     team_id = Column(Integer, ForeignKey("teams.id"), index=True, nullable=False)
     challenge_id = Column(Integer, ForeignKey("challenges.id"), index=True, nullable=False)
     unlocked_at = Column(DateTime, default=utc_now)
+
     __table_args__ = (
         UniqueConstraint("team_id", "challenge_id", name="uq_team_challenge_unlock"),
         Index("ix_unlocks_team_challenge", "team_id", "challenge_id"),
     )
 
+
 class EchoMessage(Base):
     __tablename__ = "echo_messages"
     id = Column(Integer, primary_key=True)
     team_id = Column(Integer, ForeignKey("teams.id"), index=True, nullable=False)
-    role = Column(String, index=True) # user/assistant
+    role = Column(String, index=True)    # user / assistant
     content = Column(Text)
     created_at = Column(DateTime, default=utc_now)
 
@@ -81,16 +89,23 @@ class EchoMessage(Base):
         Index("ix_echo_team_role", "team_id", "role"),
     )
 
+
 class Submission(Base):
+    """Final report submitted by an investigating team.
+
+    broadcast_schedule  — Reconstructed interrupted broadcast programme.
+    truth_theory        — The team's theory on what happened / why.
+    accuracy_score      — Admin-set accuracy score (0, 50, or 100).
+                          NULL until the admin judges the submission.
+    """
     __tablename__ = "submissions"
     id = Column(Integer, primary_key=True)
     team_id = Column(Integer, ForeignKey("teams.id"), unique=True, index=True, nullable=False)
-    happened = Column(Text)
-    involved = Column(Text)
-    timeline = Column(Text)
-    evidence = Column(Text)
-    explanation = Column(Text)
+    broadcast_schedule = Column(Text)
+    truth_theory = Column(Text)
+    accuracy_score = Column(Integer, nullable=True)   # Set by admin after judging
     submitted_at = Column(DateTime, default=utc_now)
+
 
 class FinaleScore(Base):
     __tablename__ = "finale_scores"
@@ -99,9 +114,9 @@ class FinaleScore(Base):
     score = Column(Integer, default=0)
     updated_at = Column(DateTime, default=utc_now)
 
+
 class Admin(Base):
     __tablename__ = "admins"
     id = Column(Integer, primary_key=True)
     username = Column(String, unique=True, index=True)
     password_hash = Column(String)
-
