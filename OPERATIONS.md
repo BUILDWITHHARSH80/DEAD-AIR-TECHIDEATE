@@ -15,6 +15,10 @@ The app's `meridian` cookie is HttpOnly, SameSite=Strict, and Secure when reques
 
 The schema uses the `meridian` namespace to avoid collisions with unknown `public` objects. All game tables have RLS enabled with no client policies, and `anon`/`authenticated` receive no table privileges. Server routes use the server DB connection or service role.
 
+## Integration test safety
+
+Set `TEST_URL`, `TEST_SUPABASE_DB_URL`, `TEST_SUPABASE_URL`, `TEST_SUPABASE_ANON_KEY`, `ADMIN_PASSWORD`, and `TEST_DB_ISOLATED=true` only for a disposable test deployment/database. The test suite refuses to run unless the URL and explicit isolated-database confirmation are present. Never point it at the live event project. `tests/sql/backdate_file_unlock.sql` is a test-only fixture helper and must not be applied to production.
+
 ## Event operations
 
 The control room commissions the current story documents and stations, then registers teams manually. Keep team access codes private. The Postgres `meridian.leaderboard_v` view orders all teams by unlocked-file count, latest unlock, first unlock, and team code. Paused time is not subtracted because the current event settings do not track cumulative pause duration.

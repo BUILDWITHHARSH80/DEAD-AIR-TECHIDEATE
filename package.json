@@ -12,7 +12,9 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:migrate": "node scripts/db-migrate.mjs",
     "typecheck": "tsc --noEmit",
-    "test:integration": "node tests/integration.mjs"
+    "test:integration": "node tests/integration.mjs",
+    "test:notify": "node tests/transaction-notify.mjs",
+    "test:archive-access": "node tests/archive-access.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

@@ -1,6 +1,7 @@
 import 'server-only';
 import postgres from 'postgres';
 import { notifyChange } from './supabase-admin';
+import { commitThenNotify } from './commit-notify.mjs';
 
 type BoundStatement = { sql: string; args: unknown[] };
 type RunResult = { meta: { changes: number }; rows: Record<string, unknown>[] };
@@ -65,34 +66,31 @@ function createDb(client: any) {
         first: async <T>() => (await execute(sql, args)).rows[0] as T | undefined,
         all: async <T>() => ({ results: (await execute(sql, args)).rows as T[] }),
         run: async () => {
-          const result = await execute(sql, args);
-          if (result.meta.changes) await notifyChange(changeKind(sql));
-          return result;
+          if (!mutations(sql)) return execute(sql, args);
+          return commitThenNotify(() => execute(sql, args), async (result: RunResult) => {
+            if (result.meta.changes) await notifyChange(changeKind(sql));
+          });
         },
       }),
     }),
     batch: async (statements: BoundStatement[]) => {
-      const results = await client.begin(async (tx: any) => {
+      const mutation = statements.find(statement => mutations(statement.sql));
+      return commitThenNotify(() => client.begin(async (tx: any) => {
         const values: RunResult[] = [];
         for (const statement of statements) values.push(await runQuery(tx, statement));
         return values;
-      });
-      const mutation = statements.find(statement => mutations(statement.sql));
-      if (mutation) await notifyChange(changeKind(mutation.sql));
-      return results;
+      }), async () => { if (mutation) await notifyChange(changeKind(mutation.sql)); });
     },
     transaction: async <T>(callback: (tx: {
       run: (statement: BoundStatement) => Promise<RunResult>;
       one: (sql: string, ...args: unknown[]) => Promise<Record<string, any> | undefined>;
       all: (sql: string, ...args: unknown[]) => Promise<Record<string, any>[]>;
     }) => Promise<T>, kind = 'team') => {
-      const result = await client.begin((tx: any) => callback({
+      return commitThenNotify(() => client.begin((tx: any) => callback({
         run: statement => runQuery(tx, statement),
         one: async (query, ...args) => (await runQuery(tx, { sql: query, args })).rows[0],
         all: async (query, ...args) => (await runQuery(tx, { sql: query, args })).rows,
-      }));
-      await notifyChange(kind);
-      return result;
+      })), () => notifyChange(kind));
     },
   };
 }

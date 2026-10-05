@@ -49,3 +49,5 @@ Vercel runs the standard Next.js Node.js runtime. Upload bytes go directly from 
 - `npm run typecheck` — TypeScript validation.
 - `npm run db:migrate` — apply the additive SQL migrations using `SUPABASE_DB_URL`.
 - `npm run test:integration` — integration suite against `TEST_URL`; it must be a disposable deployment backed by a separate Supabase project or local Supabase instance, never the main project.
+
+Before running integration tests, configure `TEST_URL`, `TEST_SUPABASE_DB_URL`, `TEST_SUPABASE_URL`, `TEST_SUPABASE_ANON_KEY`, `ADMIN_PASSWORD`, and `TEST_DB_ISOLATED=true`. The isolated confirmation is required so the suite cannot run accidentally against the main event database. The suite uses a test-only SQL helper for unlock-time fixtures.
