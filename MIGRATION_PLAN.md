@@ -33,6 +33,10 @@ Choose standard Next.js 16 App Router on Vercel's Node.js runtime. `next@16.2.6`
 - No persistent filesystem and many function instances: Postgres is the sole game-state store; no local file state or instance memory is authoritative.
 - Use Node.js serverless route handlers and keep request handlers short-lived. Choose the Vercel region near the configured Supabase region once the project region is known.
 
+### Source/spec mismatch found while implementing Phase 3
+
+The checked-in `lib/story.ts` seeds four documents (`01`–`04`) and eight physical challenges. This conflicts with the request's references to eight documents, eight unlockable files, and FILE `00`–`07`. The current gameplay and story content are explicitly to remain unchanged, so no new documents or passkeys will be invented. The leaderboard uses the requested `/ 8` presentation and FILE `00`–`07` slots; only actual document unlock rows can appear unlocked, and absent IDs remain `LOCKED`. This discrepancy needs a product decision before treating an eight-file event as supported.
+
 ## Phase 1+ implementation notes
 
 - Keep all app tables and the leaderboard view in `meridian` to avoid unknown `public` objects. Set the server DB connection's search path explicitly, or schema-qualify every query and view reference.

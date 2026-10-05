@@ -124,6 +124,8 @@ export async function snapshot(s: any, teamId?: string) {
     const list = admin ? await all('SELECT id,code,name,state,updated_at,revision FROM teams') : [];
     const teams = await Promise.all(list.map(async t => { t.state = await hydrateArchiveState(t.state, t.id); return t; }));
     const ranks = admin || conf.leaderboard ? await leaderboardRows() : [];
+    const rankPosition = new Map(ranks.map((row: any, index: number) => [row.id, index]));
+    teams.sort((a: any, b: any) => (rankPosition.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rankPosition.get(b.id) ?? Number.MAX_SAFE_INTEGER));
     return {
         ending: st?.broadcast && st?.truth && ['01', '02', '03', '04'].every(id => st.unlocks[id]) ? 'Adrian Vale deliberately interrupted the broadcast and entered Room Zero. ECHO isolated the distribution buses. Their actions kept the Ghost Carrier from propagating beyond Meridian.' : undefined,
         admin, now: Date.now(),
