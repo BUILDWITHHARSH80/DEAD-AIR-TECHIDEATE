@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import { prepareArchiveState, revokeArchiveAccess } from '../lib/archive-access.ts';
+
+const legacy = { unlocks: { '01': 123 }, challenges: { '01': { status: 'COMPLETED' } }, notes: ['retained'], broadcast: false, truth: false, finishedAt: 0 };
+prepareArchiveState(legacy);
+assert.deepEqual(legacy.archiveApprovals, { '01': 123 });
+assert.deepEqual(legacy.unlocks, {}, 'Old admin unlock must not count as a verified passkey');
+assert.equal(legacy.challenges['01'].status, 'COMPLETED');
+assert.deepEqual(legacy.notes, ['retained']);
+legacy.unlocks['01'] = 456;
+prepareArchiveState(legacy);
+assert.equal(legacy.unlocks['01'], 456, 'Normalizing an upgraded state must retain verified decryption');
+assert.equal(legacy.archiveApprovals['01'], 123);
+legacy.broadcast = legacy.truth = true;
+legacy.finishedAt = 789;
+revokeArchiveAccess(legacy, '01');
+assert.deepEqual(legacy.archiveApprovals, {});
+assert.deepEqual(legacy.unlocks, {});
+assert.equal(legacy.broadcast, false);
+assert.equal(legacy.truth, false);
+assert.equal(legacy.finishedAt, 0);
+assert.equal(legacy.challenges['01'].status, 'COMPLETED', 'Revocation must retain the completion record');
+console.log('PASS legacy approval conversion, verified decryption persistence, and access revocation.');
