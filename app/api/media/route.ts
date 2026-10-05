@@ -1,6 +1,7 @@
 import * as E from '@/lib/engine';
 import { mediaStorage } from '@/lib/supabase-admin';
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 const err = (e: any) => Response.json({ error: e.status ? e.message : 'MEDIA ARCHIVE INTERRUPTED. Try again.' }, { status: e.status || 503, headers: { 'Cache-Control': 'no-store' } });
 function checkOrigin(req: Request) {
     const origin = req.headers.get('origin');

@@ -3,6 +3,7 @@ import { freshState, fragments, timeline } from '@/lib/story';
 import { revokeArchiveAccess } from '@/lib/archive-access';
 import { mediaStorage } from '@/lib/supabase-admin';
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 const json = (v: any, status = 200, headers: any = {}) => Response.json(v, { status, headers: { 'Cache-Control': 'no-store', ...headers } });
 const error = (e: any) => { console.error('Meridian request failed', e.status || 500); return json({ error: e.status ? e.message : 'ARCHIVE CONNECTION INTERRUPTED. Your saved progress is preserved.' }, e.status || 503); };
 function checkOrigin(req: Request) {
@@ -60,7 +61,7 @@ export async function POST(req: Request) {
         if (action === 'logout') {
             const token = req.headers.get('cookie')?.match(/(?:^|; )meridian=([^;]+)/)?.[1] || '';
             await E.stmt('DELETE FROM sessions WHERE id=?', await E.digest(token)).run();
-            return json({ ok: true }, 200, { 'Set-Cookie': 'meridian=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' });
+            return json({ ok: true }, 200, { 'Set-Cookie': `meridian=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secureRequest(req) ? '; Secure' : ''}` });
         }
         if (action === 'commission') {
             if (s.role !== 'admin')

@@ -1,6 +1,7 @@
 import * as E from '@/lib/engine';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 export async function GET(req: Request) {
   try {
