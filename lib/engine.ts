@@ -52,11 +52,36 @@ export async function saveTeam(t: any, actor: string, action: string, detail = '
 export function publicTeam(t: any) { const s = t.state; return { id: t.id, code: t.code, name: t.name, updatedAt: t.updated_at, state: s, revision: t.revision }; }
 export function progress(s: any) { return Math.round((Object.values(s.challenges).filter((x: any) => x.status === 'COMPLETED').length + Object.keys(s.unlocks).length + (s.broadcast ? 2 : 0) + (s.truth ? 2 : 0)) / 20 * 100); }
 export async function commission() { if (await one('SELECT id FROM settings WHERE id=?', 'event'))
-    return null; const rows: any[] = []; const now = Date.now(); for (let i = 1; i <= 40; i++) {
-    const code = 'TEAM ' + String(i).padStart(2, '0');
-    const access = uuid().replaceAll('-', '').slice(0, 12);
-    rows.push({ id: uuid(), code, name: code, access, password: await hash(access) });
-} const statements = [stmt('INSERT INTO settings(id,value) VALUES(?,?)', 'event', JSON.stringify(defaultSettings)), ...rows.map(t => stmt('INSERT INTO teams(id,code,name,password,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)', t.id, t.code, t.name, t.password, JSON.stringify(freshState()), now, now)), ...initialDocuments.map(d => { const { passkey, ...data } = d; return stmt('INSERT INTO documents(id,data,passkey) VALUES(?,?,?)', d.id, JSON.stringify(data), passkey); }), ...initialChallenges.map(c => stmt('INSERT INTO challenges(id,data) VALUES(?,?)', c.id, JSON.stringify(c))), logStatement('admin', null, 'COMMISSION', '40 teams, 8 documents and 8 stations seeded')]; await db().batch(statements); return rows.map(({ code, name, access }) => ({ code, name, access })); }
+    return null; const statements = [stmt('INSERT INTO settings(id,value) VALUES(?,?)', 'event', JSON.stringify(defaultSettings)), ...initialDocuments.map(d => { const { passkey, ...data } = d; return stmt('INSERT INTO documents(id,data,passkey) VALUES(?,?,?)', d.id, JSON.stringify(data), passkey); }), ...initialChallenges.map(c => stmt('INSERT INTO challenges(id,data) VALUES(?,?)', c.id, JSON.stringify(c))), logStatement('admin', null, 'COMMISSION', '8 documents and 8 stations seeded; no teams registered')]; await db().batch(statements); return []; }
+export function normalizeTeamCode(value: unknown) { let code = String(value ?? '').trim().toUpperCase().replace(/\s+/g, ' '); const numbered = code.match(/^TEAM\s*0?(\d+)$/); if (numbered) code = 'TEAM ' + String(Number(numbered[1])).padStart(2, '0'); return code; }
+export async function addTeams(input: unknown) {
+    if (!Array.isArray(input) || input.length < 1 || input.length > 100) fail('Register between 1 and 100 teams at a time.');
+    const existing = await all('SELECT code,name FROM teams');
+    const codes = new Set(existing.map((t: any) => normalizeTeamCode(t.code)));
+    const names = new Set(existing.map((t: any) => String(t.name).trim().toLocaleLowerCase('en-US')));
+    const prepared: any[] = [];
+    for (let i = 0; i < input.length; i++) {
+        const row: any = input[i]; const label = `Team ${i + 1}`;
+        if (!row || typeof row !== 'object' || Array.isArray(row)) fail(`${label}: invalid row.`);
+        const name = String(row.name ?? '').trim();
+        if (!name || name.length > 80) fail(`${label}: name is required and must be at most 80 characters.`);
+        if (names.has(name.toLocaleLowerCase('en-US'))) fail(`${label}: team name already exists (names must be unique, ignoring case).`);
+        const explicit = row.code !== undefined && String(row.code).trim() !== '';
+        let code = explicit ? normalizeTeamCode(row.code) : '';
+        if (explicit && (!/^[A-Z0-9][A-Z0-9 _-]{1,31}$/.test(code) || !/[A-Z0-9]$/.test(code))) fail(`${label}: ID must be 2–32 characters using letters, numbers, spaces, hyphens or underscores.`);
+        if (!explicit) { do { code = 'TEAM-' + uuid().replaceAll('-', '').slice(0, 12).toUpperCase(); } while (codes.has(code)); }
+        if (codes.has(code)) fail(`${label}: team ID already exists.`);
+        const supplied = row.accessCode !== undefined && String(row.accessCode).trim() !== '';
+        const access = supplied ? String(row.accessCode).trim() : uuid().replaceAll('-', '').slice(0, 16);
+        if (access.length < 8 || access.length > 64) fail(`${label}: access code must be 8–64 characters.`);
+        codes.add(code); names.add(name.toLocaleLowerCase('en-US'));
+        prepared.push({ id: uuid(), code, name, access, password: await hash(access) });
+    }
+    const now = Date.now();
+    const statements = prepared.flatMap(t => [stmt('INSERT INTO teams(id,code,name,password,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)', t.id, t.code, t.name, t.password, JSON.stringify(freshState()), now, now), logStatement('admin', t.id, 'TEAM REGISTERED', t.code)]);
+    await db().batch(statements);
+    return prepared.map(({ id, code, name, access }) => ({ id, code, name, access }));
+}
 export async function snapshot(s: any, teamId?: string) {
     const conf = (await settings()).value;
     const docs = (await all('SELECT * FROM documents')).map(d => ({ ...JSON.parse(d.data), passkey: d.passkey }));

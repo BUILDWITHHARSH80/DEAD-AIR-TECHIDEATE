@@ -36,9 +36,7 @@ export async function POST(req: Request) {
                 role = 'admin';
             }
             else {
-                const code = String(b.code || '').trim().toUpperCase().replace(/^TEAM\s*0?(\d+)$/, 'TEAM $1');
-                const number = Number(code.replace('TEAM ', ''));
-                const canonical = 'TEAM ' + String(number).padStart(2, '0');
+                const canonical = E.normalizeTeamCode(b.code);
                 const t = await E.one('SELECT * FROM teams WHERE code=?', canonical);
                 if (!t || String(b.name || '').trim().toLowerCase() !== t.name.toLowerCase() || !await E.verify(String(b.password || ''), t.password))
                     E.fail('ACCESS DENIED. Check your team ID, name and access code.', 401);
@@ -65,6 +63,10 @@ export async function POST(req: Request) {
         if (action.startsWith('admin.')) {
             if (s.role !== 'admin')
                 E.fail('CONTROL ROOM ACCESS DENIED.', 403);
+            if (action === 'admin.addTeams') {
+                const credentials = await E.addTeams(b.teams);
+                return json({ credentials });
+            }
             if (action === 'admin.event') {
                 const v = c.value;
                 const mode = b.mode;
@@ -183,6 +185,19 @@ export async function POST(req: Request) {
             const st = t.state;
             if (action === 'admin.team') {
                 const op = b.op;
+                if (op === 'delete') {
+                    if (b.confirm !== t.code) E.fail('Type the team ID to delete this team.');
+                    const media = await E.all('SELECT id FROM media WHERE team_id=?', t.id);
+                    for (const item of media) await E.bucket().delete(item.id);
+                    await E.db().batch([E.stmt('DELETE FROM sessions WHERE team_id=?', t.id), E.stmt('DELETE FROM media WHERE team_id=?', t.id), E.stmt('DELETE FROM activity WHERE team_id=?', t.id), E.stmt('DELETE FROM teams WHERE id=?', t.id), E.logStatement('admin', null, 'TEAM DELETED', t.code)]);
+                    return json({ ok: true });
+                }
+                if (op === 'setPassword') {
+                    const access = String(b.accessCode ?? '').trim();
+                    if (access.length < 8 || access.length > 64) E.fail('Access code must be 8–64 characters.');
+                    await E.db().batch([E.stmt('UPDATE teams SET password=? WHERE id=?', await E.hash(access), t.id), E.stmt('DELETE FROM sessions WHERE team_id=?', t.id), E.logStatement('admin', t.id, 'ACCESS CODE SET')]);
+                    return json({ ok: true });
+                }
                 if (op === 'challenge') {
                     const challenge = await E.one('SELECT data FROM challenges WHERE id=?', b.id);
                     if (!challenge)
