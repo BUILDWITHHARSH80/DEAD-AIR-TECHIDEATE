@@ -1,10 +1,20 @@
-import { env } from 'cloudflare:workers';
 import * as E from '@/lib/engine';
 import { freshState, fragments, timeline } from '@/lib/story';
 import { revokeArchiveAccess } from '@/lib/archive-access';
+import { mediaStorage } from '@/lib/supabase-admin';
 export const dynamic = 'force-dynamic';
 const json = (v: any, status = 200, headers: any = {}) => Response.json(v, { status, headers: { 'Cache-Control': 'no-store', ...headers } });
-const error = (e: any) => { console.error('Meridian request failed', e.status || 500, e.message); return json({ error: e.status ? e.message : 'ARCHIVE CONNECTION INTERRUPTED. Your saved progress is preserved.' }, e.status || 503); };
+const error = (e: any) => { console.error('Meridian request failed', e.status || 500); return json({ error: e.status ? e.message : 'ARCHIVE CONNECTION INTERRUPTED. Your saved progress is preserved.' }, e.status || 503); };
+function checkOrigin(req: Request) {
+    const origin = req.headers.get('origin');
+    if (!origin) return;
+    let originHost = '';
+    try { originHost = new URL(origin).host.toLowerCase(); } catch { E.fail('Origin rejected.', 403); }
+    const requestHost = (req.headers.get('x-forwarded-host') || req.headers.get('host') || new URL(req.url).host).split(',')[0].trim().toLowerCase();
+    const vercelHost = process.env.VERCEL_URL?.toLowerCase();
+    if (originHost !== requestHost && originHost !== vercelHost) E.fail('Origin rejected.', 403);
+}
+function secureRequest(req: Request) { return req.headers.get('x-forwarded-proto')?.split(',')[0].trim() === 'https' || new URL(req.url).protocol === 'https:'; }
 export async function GET(req: Request) { try {
     const s = await E.requireSession(req);
     return json(await E.snapshot(s, new URL(req.url).searchParams.get('team') || undefined));
@@ -14,20 +24,19 @@ catch (e) {
 } }
 export async function POST(req: Request) {
     try {
-        const origin = req.headers.get('origin');
-        if (origin && origin !== new URL(req.url).origin)
-            E.fail('Origin rejected.', 403);
+        checkOrigin(req);
         if (Number(req.headers.get('content-length') || 0) > 100000)
             E.fail('Request too large.', 413);
         const b: any = await E.readJson(req);
         const action = String(b.action || '');
         if (action === 'login') {
-            await E.rate('login:' + (req.headers.get('cf-connecting-ip') || 'local'), 240);
-            await E.rate('account:' + String(b.admin ? b.username : b.code) + ':' + (req.headers.get('cf-connecting-ip') || 'local'), 12);
+            const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0].trim() || 'local';
+            await E.rate('login:' + clientIp, 240);
+            await E.rate('account:' + String(b.admin ? b.username : b.code) + ':' + clientIp, 12);
             let role = 'team', teamId = null;
             const admin = b.admin === true;
             if (admin) {
-                const password = (env as any).ADMIN_PASSWORD || process.env.ADMIN_PASSWORD;
+                const password = process.env.ADMIN_PASSWORD;
                 if (!password)
                     E.fail('Control room credentials have not been configured.', 503);
                 const supplied = await E.digest(String(b.password || ''));
@@ -45,7 +54,7 @@ export async function POST(req: Request) {
             const token = E.uuid() + E.uuid();
             await E.stmt('INSERT INTO sessions(id,role,team_id,expires) VALUES(?,?,?,?)', await E.digest(token), role, teamId, Date.now() + 12 * 3600000).run();
             await E.stmt('DELETE FROM limits WHERE expires<?', Date.now()).run();
-            return json({ admin: role === 'admin' }, 200, { 'Set-Cookie': `meridian=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${new URL(req.url).protocol === 'https:' ? '; Secure' : ''}` });
+            return json({ admin: role === 'admin' }, 200, { 'Set-Cookie': `meridian=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${secureRequest(req) ? '; Secure' : ''}` });
         }
         const s = await E.requireSession(req);
         if (action === 'logout') {
@@ -108,7 +117,7 @@ export async function POST(req: Request) {
                 }
                 else
                     E.fail('Unknown timer command.');
-                const result = await E.db().batch([E.stmt('UPDATE settings SET value=?,revision=revision+1 WHERE id=? AND revision=?', JSON.stringify(v), 'event', c.revision), E.logStatement('admin', null, 'EVENT ' + mode)]);
+                const result = await E.db().batch([E.stmt('UPDATE settings SET value=?::jsonb,revision=revision+1 WHERE id=? AND revision=?', JSON.stringify(v), 'event', c.revision), E.logStatement('admin', null, 'EVENT ' + mode)]);
                 if (!result[0].meta.changes)
                     E.fail('Timer changed elsewhere. Retry.', 409);
                 return json({ ok: true });
@@ -134,28 +143,28 @@ export async function POST(req: Request) {
                         E.fail('Seven scoring weights must sum to 100.');
                     v.weights = b.value.weights;
                 }
-                await E.db().batch([E.stmt('UPDATE settings SET value=?,revision=revision+1 WHERE id=?', JSON.stringify(v), 'event'), E.logStatement('admin', null, 'SETTINGS UPDATED')]);
+                await E.db().batch([E.stmt('UPDATE settings SET value=?::jsonb,revision=revision+1 WHERE id=?', JSON.stringify(v), 'event'), E.logStatement('admin', null, 'SETTINGS UPDATED')]);
                 return json({ ok: true });
             }
             if (action === 'admin.document') {
                 const row = await E.one('SELECT * FROM documents WHERE id=?', b.id);
                 if (!row)
                     E.fail('File not found.', 404);
-                const d = JSON.parse(row.data);
+                const d = E.parseJson(row.data);
                 for (const key of ['title', 'subtitle', 'description', 'content', 'classification', 'question', 'echo'])
                     if (key in b.value)
                         d[key] = String(b.value[key]).slice(0, 20000);
                 const passkey = String(b.value.passkey ?? row.passkey).trim();
                 if (!/^\d{4}$/.test(passkey))
                     E.fail('Passkeys must contain four digits.');
-                await E.db().batch([E.stmt('UPDATE documents SET data=?,passkey=? WHERE id=?', JSON.stringify(d), passkey, b.id), E.logStatement('admin', null, 'DOCUMENT UPDATED', b.id)]);
+                await E.db().batch([E.stmt('UPDATE documents SET data=?::jsonb,passkey=? WHERE id=?', JSON.stringify(d), passkey, b.id), E.logStatement('admin', null, 'DOCUMENT UPDATED', b.id)]);
                 return json({ ok: true });
             }
             if (action === 'admin.challenge') {
                 const row = await E.one('SELECT * FROM challenges WHERE id=?', b.id);
                 if (!row)
                     E.fail('Station not found.', 404);
-                const v = JSON.parse(row.data);
+                const v = E.parseJson(row.data);
                 if (b.value.document && !await E.one('SELECT id FROM documents WHERE id=?', b.value.document))
                     E.fail('Unknown target document.');
                 for (const key of ['name', 'description', 'instructions', 'document'])
@@ -163,7 +172,7 @@ export async function POST(req: Request) {
                         v[key] = String(b.value[key]).slice(0, 2000);
                 if ('enabled' in b.value)
                     v.enabled = !!b.value.enabled;
-                await E.db().batch([E.stmt('UPDATE challenges SET data=? WHERE id=?', JSON.stringify(v), b.id), E.logStatement('admin', null, 'STATION UPDATED', b.id)]);
+                await E.db().batch([E.stmt('UPDATE challenges SET data=?::jsonb WHERE id=?', JSON.stringify(v), b.id), E.logStatement('admin', null, 'STATION UPDATED', b.id)]);
                 return json({ ok: true });
             }
             if (action === 'admin.media') {
@@ -171,7 +180,8 @@ export async function POST(req: Request) {
                 if (!m)
                     E.fail('Media not found.', 404);
                 if (b.status === 'REMOVE') {
-                    await E.bucket().delete(m.id);
+                    const { error } = await mediaStorage().remove([m.storage_path]);
+                    if (error) throw error;
                     await E.db().batch([E.stmt('DELETE FROM media WHERE id=?', m.id), E.logStatement('admin', m.team_id, 'MEDIA REMOVED', m.name)]);
                 }
                 else {
@@ -185,10 +195,15 @@ export async function POST(req: Request) {
             const st = t.state;
             if (action === 'admin.team') {
                 const op = b.op;
+                const extra: any[] = [];
                 if (op === 'delete') {
                     if (b.confirm !== t.code) E.fail('Type the team ID to delete this team.');
-                    const media = await E.all('SELECT id FROM media WHERE team_id=?', t.id);
-                    for (const item of media) await E.bucket().delete(item.id);
+                    const media = await E.all('SELECT storage_path FROM media WHERE team_id=?', t.id);
+                    const paths = media.map((item: any) => item.storage_path).filter(Boolean);
+                    if (paths.length) {
+                        const { error } = await mediaStorage().remove(paths);
+                        if (error) throw error;
+                    }
                     await E.db().batch([E.stmt('DELETE FROM sessions WHERE team_id=?', t.id), E.stmt('DELETE FROM media WHERE team_id=?', t.id), E.stmt('DELETE FROM activity WHERE team_id=?', t.id), E.stmt('DELETE FROM teams WHERE id=?', t.id), E.logStatement('admin', null, 'TEAM DELETED', t.code)]);
                     return json({ ok: true });
                 }
@@ -208,12 +223,15 @@ export async function POST(req: Request) {
                         return json({ ok: true });
                     st.challenges[b.id] = { status: b.status, time: Date.now(), startedAt: st.challenges[b.id]?.startedAt || Date.now() };
                     if (b.status !== 'COMPLETED') {
-                        const document = JSON.parse(challenge.data).document;
+                        const document = E.parseJson(challenge.data).document;
                         const stations = await E.all('SELECT data FROM challenges');
                         if (!stations.some(row => {
-                            const station = JSON.parse(row.data);
+                            const station = E.parseJson(row.data);
                             return station.document === document && st.challenges[station.id]?.status === 'COMPLETED';
-                        }) && (st.archiveApprovals[document] || st.unlocks[document])) revokeArchiveAccess(st, document);
+                        }) && (st.archiveApprovals[document] || st.unlocks[document])) {
+                            revokeArchiveAccess(st, document);
+                            extra.push(E.stmt('DELETE FROM file_unlocks WHERE team_id=? AND document_id=?', t.id, document));
+                        }
                     }
                 }
                 else if (op === 'unlock') {
@@ -221,13 +239,15 @@ export async function POST(req: Request) {
                         E.fail('Unknown file.');
                     const stations = await E.all('SELECT data FROM challenges');
                     if (!stations.some(row => {
-                        const station = JSON.parse(row.data);
+                        const station = E.parseJson(row.data);
                         return station.document === b.id && st.challenges[station.id]?.status === 'COMPLETED';
                     })) E.fail('Complete the associated challenge before approving passkey entry.', 409);
                     st.archiveApprovals[b.id] = Date.now();
+                    extra.push(E.stmt('INSERT INTO file_unlocks(team_id,document_id,approved_at) VALUES(?,?,now()) ON CONFLICT(team_id,document_id) DO UPDATE SET approved_at=now()', t.id, b.id));
                 }
                 else if (op === 'lock') {
                     revokeArchiveAccess(st, b.id);
+                    extra.push(E.stmt('DELETE FROM file_unlocks WHERE team_id=? AND document_id=?', t.id, b.id));
                 }
                 else if (op === 'hint') {
                     st.hints.push({ id: E.uuid(), level: 0, text: String(b.text || 'Review the station records.').slice(0, 2000), cost: 0, time: Date.now() });
@@ -257,6 +277,7 @@ export async function POST(req: Request) {
                     if (b.confirm !== t.code)
                         E.fail('Type the team ID to reset.');
                     t.state = freshState();
+                    extra.push(E.stmt('DELETE FROM file_unlocks WHERE team_id=?', t.id));
                 }
                 else if (op === 'rename') {
                     t.name = String(b.name).trim().slice(0, 80);
@@ -270,7 +291,7 @@ export async function POST(req: Request) {
                 }
                 else
                     E.fail('Unknown team command.');
-                await E.saveTeam(t, 'admin', op === 'unlock' ? 'ARCHIVE APPROVED' : op === 'lock' ? 'ARCHIVE REVOKED' : op.toUpperCase(), String(b.id || b.text || ''));
+                await E.saveTeam(t, 'admin', op === 'unlock' ? 'ARCHIVE APPROVED' : op === 'lock' ? 'ARCHIVE REVOKED' : op.toUpperCase(), String(b.id || b.text || ''), extra);
                 return json({ ok: true });
             }
             E.fail('Unknown admin action.');
@@ -289,14 +310,13 @@ export async function POST(req: Request) {
                 E.fail('ADMIN APPROVAL REQUIRED. Ask the marshal to approve passkey entry for this file.', 409);
             const stations = await E.all('SELECT data FROM challenges');
             if (!stations.some(row => {
-                const station = JSON.parse(row.data);
+                const station = E.parseJson(row.data);
                 return station.document === b.id && st.challenges[station.id]?.status === 'COMPLETED';
             })) E.fail('MARSHAL VERIFICATION REQUIRED. The associated physical challenge has not been recorded for this team.', 409);
             const passkey = String(b.passkey ?? '').trim();
             if (!/^\d{4}$/.test(passkey) || passkey !== d.passkey)
                 E.fail('PASSKEY REJECTED. Enter the four digits on the code given to your team by the marshal.');
-            if (!st.unlocks[b.id])
-                st.unlocks[b.id] = Date.now();
+            st.unlocks[b.id] ||= Date.now();
         }
         else if (action === 'echo') {
             const q = String(b.question || '').trim().slice(0, 500);
@@ -355,7 +375,8 @@ export async function POST(req: Request) {
         else
             E.fail('Unknown station action.');
         if (action !== 'unlock') E.running((await E.settings()).value);
-        await E.saveTeam(t, t.code, action.toUpperCase(), String(b.id || ''));
+        const extra = action === 'unlock' ? [E.stmt('UPDATE file_unlocks SET unlocked_at=coalesce(unlocked_at,now()) WHERE team_id=? AND document_id=? AND approved_at IS NOT NULL', t.id, b.id)] : [];
+        await E.saveTeam(t, t.code, action.toUpperCase(), String(b.id || ''), extra);
         return json({ ok: true });
     }
     catch (e) {
