@@ -10,7 +10,16 @@ import { Switch } from '@/components/ui/switch';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { AlertDialog, AlertDialogContent, AlertDialogTitle, AlertDialogDescription, AlertDialogCancel, AlertDialogAction, AlertDialogFooter } from '@/components/ui/alert-dialog';
 import { Toaster, toast } from 'sonner';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 type Any = any;
+let browserSupabase: SupabaseClient | undefined;
+function getBrowserSupabase() {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!url || !key) return null;
+    browserSupabase ??= createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false } });
+    return browserSupabase;
+}
 const clock = (n: number) => { const v = Math.max(0, Math.floor(n)); return [Math.floor(v / 3600), Math.floor(v / 60) % 60, v % 60].map(x => String(x).padStart(2, '0')).join(':'); };
 const date = (t: number) => t ? new Date(t).toLocaleTimeString() : 'â€”';
 const pct = (s: Any) => Math.round((Object.values(s.challenges).filter((x: Any) => x.status === 'COMPLETED').length + Object.keys(s.unlocks).length + (s.broadcast ? 2 : 0) + (s.truth ? 2 : 0)) / 20 * 100);
@@ -54,8 +63,13 @@ export default function Console() {
             location.href = '/participant/case';
             return;
         }
-        setData(v);
-        setConnected(true);
+        let leaderboard = v.leaderboard || [];
+        if (v.admin || v.settings.leaderboard) {
+            const leaderboardResponse = await fetch('/api/leaderboard', { cache: 'no-store' });
+            const leaderboardResult: any = leaderboardResponse.ok ? await leaderboardResponse.json() : null;
+            leaderboard = leaderboardResult?.rows || v.leaderboard || [];
+        }
+        setData({ ...v, leaderboard });
         setError('');
     }
     catch (e: Any) {
@@ -65,11 +79,35 @@ export default function Console() {
     finally {
         setLoading(false);
     } }, [path, login, selected, admin]);
-    useEffect(() => { load(); if (login || !path)
-        return; const events = new EventSource('/api/events'); events.addEventListener('change', () => { if (!document.hidden)
-        load(); }); events.onerror = () => setConnected(false); events.onopen = () => setConnected(true); const interval = setInterval(() => { if (!document.hidden)
-        load(); }, 15000); const visibility = () => { if (!document.hidden)
-        load(); }; document.addEventListener('visibilitychange', visibility); return () => { events.close(); clearInterval(interval); document.removeEventListener('visibilitychange', visibility); }; }, [load, login, path]);
+    useEffect(() => {
+        load();
+        if (login || !path) return;
+        let channelUp = false;
+        let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+        let lastRefreshAt = 0;
+        const client = getBrowserSupabase();
+        const channel = client?.channel('meridian-event').on('broadcast', { event: 'change' }, () => {
+            if (document.hidden || refreshTimer) return;
+            const wait = Math.max(0, 1000 - (Date.now() - lastRefreshAt));
+            refreshTimer = setTimeout(() => { refreshTimer = undefined; lastRefreshAt = Date.now(); void load(); }, wait);
+        }).subscribe(status => {
+            channelUp = status === 'SUBSCRIBED';
+            setConnected(channelUp);
+            if (channelUp && !document.hidden) void load();
+        });
+        if (!client) setConnected(false);
+        const fallback = setInterval(() => { if (!document.hidden && !channelUp) void load(); }, 3000);
+        const recovery = setInterval(() => { if (!document.hidden) void load(); }, 15000);
+        const visibility = () => { if (!document.hidden) void load(); };
+        document.addEventListener('visibilitychange', visibility);
+        return () => {
+            if (refreshTimer) clearTimeout(refreshTimer);
+            clearInterval(fallback);
+            clearInterval(recovery);
+            document.removeEventListener('visibilitychange', visibility);
+            if (channel && client) void client.removeChannel(channel);
+        };
+    }, [load, login, path]);
     useEffect(() => { const tick = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(tick); }, []);
     useEffect(() => () => { audio.current?.close(); }, []);
     useEffect(() => { const mc = (document as Any).modelContext; if (!mc?.registerTool || !data)

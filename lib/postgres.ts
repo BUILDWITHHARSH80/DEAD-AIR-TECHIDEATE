@@ -1,5 +1,6 @@
 import 'server-only';
 import postgres from 'postgres';
+import { notifyChange } from './supabase-admin';
 
 type BoundStatement = { sql: string; args: unknown[] };
 type RunResult = { meta: { changes: number }; rows: Record<string, unknown>[] };
@@ -41,6 +42,11 @@ function mutations(sql: string) {
   return /^\s*(INSERT|UPDATE|DELETE|WITH\b[\s\S]*?\b(INSERT|UPDATE|DELETE))\b/i.test(sql);
 }
 
+function changeKind(sql: string) {
+  const table = sql.match(/\b(?:INTO|UPDATE|FROM)\s+(?:meridian\.)?([a-z_]+)/i)?.[1]?.toLowerCase();
+  return table === 'file_unlocks' ? 'file_unlock' : table || 'game_state';
+}
+
 async function runQuery(client: any, statement: BoundStatement): Promise<RunResult> {
   const sql = placeholders(statement.sql);
   const isMutation = mutations(sql);
@@ -58,16 +64,28 @@ function createDb(client: any) {
         args,
         first: async <T>() => (await execute(sql, args)).rows[0] as T | undefined,
         all: async <T>() => ({ results: (await execute(sql, args)).rows as T[] }),
-        run: () => execute(sql, args),
+        run: async () => {
+          const result = await execute(sql, args);
+          if (result.meta.changes) await notifyChange(changeKind(sql));
+          return result;
+        },
       }),
     }),
-    batch: async (statements: BoundStatement[]) => client.begin(async (tx: any) => {
-      const results: RunResult[] = [];
-      for (const statement of statements) results.push(await runQuery(tx, statement));
+    batch: async (statements: BoundStatement[]) => {
+      const results = await client.begin(async (tx: any) => {
+        const values: RunResult[] = [];
+        for (const statement of statements) values.push(await runQuery(tx, statement));
+        return values;
+      });
+      const mutation = statements.find(statement => mutations(statement.sql));
+      if (mutation) await notifyChange(changeKind(mutation.sql));
       return results;
-    }),
-    transaction: async <T>(callback: (tx: { run: (statement: BoundStatement) => Promise<RunResult> }) => Promise<T>) =>
-      client.begin((tx: any) => callback({ run: statement => runQuery(tx, statement) })),
+    },
+    transaction: async <T>(callback: (tx: { run: (statement: BoundStatement) => Promise<RunResult> }) => Promise<T>) => {
+      const result = await client.begin((tx: any) => callback({ run: statement => runQuery(tx, statement) }));
+      await notifyChange('team');
+      return result;
+    },
   };
 }
 
