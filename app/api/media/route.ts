@@ -12,61 +12,56 @@ function checkOrigin(req: Request) {
 }
 
 export async function GET(req: Request) { try {
-    const s = await E.requireSession(req);
-    const m = await E.one('SELECT * FROM media WHERE id=?', new URL(req.url).searchParams.get('id'));
-    if (!m || s.role !== 'admin' && m.team_id !== s.team_id) E.fail('Archive not found.', 404);
-    const { data, error } = await mediaStorage().download(m.storage_path);
-    if (error || !data) E.fail('Media unavailable.', 404);
-    return new Response(data, { headers: { 'Content-Type': m.mime, 'Content-Length': String(m.size), 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': `${new URL(req.url).searchParams.has('download') ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(m.name)}` } });
+    const session = await E.requireSession(req);
+    const media = await E.one('SELECT * FROM media WHERE id=?', new URL(req.url).searchParams.get('id'));
+    if (!media || session.role !== 'admin' && media.team_id !== session.team_id) E.fail('Archive not found.', 404);
+    const download = new URL(req.url).searchParams.has('download') ? media.name : undefined;
+    const { data, error } = await mediaStorage().createSignedUrl(media.storage_path, 60, { download });
+    if (error || !data?.signedUrl) E.fail('Media unavailable.', 404);
+    return new Response(null, { status: 302, headers: { Location: data.signedUrl, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' } });
 } catch (e) { return err(e); } }
 
 export async function POST(req: Request) { try {
     checkOrigin(req);
-    const s = await E.requireSession(req);
-    if (s.role !== 'team') E.fail('Investigator session required.', 403);
-    const c = (await E.settings()).value;
-    E.running(c);
-    await E.rate('upload:' + s.team_id, 8);
-    const t = await E.team(s.team_id);
-    if (t.state.submittedAt) E.fail('Media is locked after final submission. Ask a marshal to review it.', 409);
-    const max = c.maxUploadMB * 1024 * 1024;
-    if (Number(req.headers.get('content-length') || 0) > max + 8192) E.fail('File exceeds the configured upload limit.', 413);
-    const count = await E.one('SELECT count(*) AS n FROM media WHERE team_id=?', s.team_id);
-    if (Number(count.n) >= 12) E.fail('Archive holds at most 12 fragments per team. Remove one before uploading.');
-    const form = await req.formData();
-    const file = form.get('file');
-    if (!(file instanceof File) || !file.size || file.size > max) E.fail('Choose a media file within the upload limit.');
-    const ext = file.name.split('.').pop()?.toLowerCase();
+    const session = await E.requireSession(req);
+    if (session.role !== 'team') E.fail('Investigator session required.', 403);
+    const settings = (await E.settings()).value;
+    E.running(settings);
+    await E.rate('upload:' + session.team_id, 8);
+    const body: any = await E.readJson(req);
+    const name = String(body.name || '').trim();
+    const size = Number(body.size);
+    const ext = name.split('.').pop()?.toLowerCase();
     const types: Record<string, string> = { mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime' };
+    if (!name || name.length > 180 || !Number.isSafeInteger(size) || size < 1 || size > settings.maxUploadMB * 1024 * 1024) E.fail('Choose a media file within the configured upload limit.');
     if (!ext || !types[ext]) E.fail('Use MP3, WAV, M4A, MP4, WEBM or MOV.');
-    const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
-    const magic = head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33 || head[0] === 0xff && (head[1] & 0xe0) === 0xe0 || new TextDecoder().decode(head).startsWith('RIFF') || new TextDecoder().decode(head.slice(4, 8)) === 'ftyp' || new TextDecoder().decode(head).startsWith('WEBM');
-    if (!magic) E.fail('File signature does not match supported audio or video media.');
-    const id = E.uuid();
-    const path = `${s.team_id}/${id}`;
-    const { error: uploadError } = await mediaStorage().upload(path, file, { contentType: types[ext], upsert: false });
-    if (uploadError) throw uploadError;
-    try {
-        await E.db().batch([E.stmt('INSERT INTO media(id,team_id,name,mime,size,status,storage_path) VALUES(?,?,?,?,?,?,?)', id, s.team_id, file.name.slice(0, 180), types[ext], file.size, 'ARCHIVED', path), E.logStatement(t.code, t.id, 'MEDIA UPLOADED', file.name.slice(0, 180))]);
-    } catch (e) {
-        await mediaStorage().remove([path]);
-        throw e;
+    const expired = await E.all('SELECT storage_path FROM media_upload_intents WHERE team_id=? AND expires<?', session.team_id, Date.now());
+    const expiredPaths = expired.map((item: any) => item.storage_path);
+    if (expiredPaths.length) {
+        const { error } = await mediaStorage().remove(expiredPaths);
+        if (error) throw error;
     }
-    return Response.json({ id, status: 'ARCHIVED' }, { headers: { 'Cache-Control': 'no-store' } });
+    const intent = await E.reserveMediaUpload(session.team_id, name, types[ext], size);
+    const { data, error } = await mediaStorage().createSignedUploadUrl(intent.path, { upsert: false });
+    if (error || !data) {
+        await E.stmt('DELETE FROM media_upload_intents WHERE id=?', intent.id).run();
+        throw error || new Error('Could not authorize the media upload.');
+    }
+    return Response.json({ id: intent.id, path: data.path, token: data.token }, { headers: { 'Cache-Control': 'no-store' } });
 } catch (e) { return err(e); } }
 
 export async function DELETE(req: Request) { try {
     checkOrigin(req);
-    const s = await E.requireSession(req);
-    if (s.role !== 'team') E.fail('Investigator session required.', 403);
-    const c = (await E.settings()).value;
-    E.running(c);
-    const m = await E.one('SELECT * FROM media WHERE id=?', new URL(req.url).searchParams.get('id'));
-    if (!m || m.team_id !== s.team_id) E.fail('Archive not found.', 404);
-    const t = await E.team(s.team_id);
-    if (t.state.submittedAt) E.fail('Submitted media is locked.', 409);
-    const { error } = await mediaStorage().remove([m.storage_path]);
+    const session = await E.requireSession(req);
+    if (session.role !== 'team') E.fail('Investigator session required.', 403);
+    const settings = (await E.settings()).value;
+    E.running(settings);
+    const media = await E.one('SELECT * FROM media WHERE id=?', new URL(req.url).searchParams.get('id'));
+    if (!media || media.team_id !== session.team_id) E.fail('Archive not found.', 404);
+    const team = await E.team(session.team_id);
+    if (team.state.submittedAt) E.fail('Submitted media is locked.', 409);
+    const { error } = await mediaStorage().remove([media.storage_path]);
     if (error) throw error;
-    await E.db().batch([E.stmt('DELETE FROM media WHERE id=?', m.id), E.logStatement(t.code, t.id, 'MEDIA DELETED', m.name)]);
+    await E.db().batch([E.stmt('DELETE FROM media WHERE id=?', media.id), E.logStatement(team.code, team.id, 'MEDIA DELETED', media.name)]);
     return Response.json({ ok: true }, { headers: { 'Cache-Control': 'no-store' } });
 } catch (e) { return err(e); } }

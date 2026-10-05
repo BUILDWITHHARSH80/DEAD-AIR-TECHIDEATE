@@ -219,21 +219,33 @@ else {
     }
     setPlaying(true);
 } }}>{playing ? 'PAUSE' : 'PLAY'} TRANSCRIPT PREVIEW</button><button className="quiet" onClick={() => { speechSynthesis.cancel(); setPlaying(false); }}>STOP</button><small>Synthesised reading of recovered text</small></div><div className="two"><Ordered items={data.fragments} ids={ids} setIds={setIds} label="01 / BROADCAST SEQUENCE"/><Ordered items={data.timeline} ids={tids} setIds={setTids} label="02 / WHAT REALLY HAPPENED?"/></div><MediaPanel data={data} act={act} load={load}/><section className="panel"><p className="eyebrow">03 / FINAL TRUTH SUBMISSION</p><div className="two">{questions.map((q, i) => <label key={q}>{i + 1}. {q}<textarea rows={3} maxLength={3000} value={answers[i]} onChange={e => setAnswers(answers.map((a, j) => i === j ? e.target.value : a))}/></label>)}</div><label>FINAL WRITTEN EXPLANATION<textarea rows={5} maxLength={10000} value={explanation} onChange={e => setExplanation(e.target.value)} placeholder="Connect the evidence. Distinguish the programme interruption from the station-wide blackout."/></label><label className="switchrow"><Switch checked={confirmed} onCheckedChange={setConfirmed}/> We confirm this is our final reconstruction of the archived warning.</label><div className="toolbar"><button className="quiet" disabled={busy} onClick={() => void act('draft', { value }).catch(() => { })}>SAVE DRAFT</button><button disabled={busy || !confirmed || answers.some(a => a.trim().length < 8) || explanation.trim().length < 80 || s.truth} onClick={() => void act('submit', { value }).catch(() => { })}>SUBMIT FINAL TRANSMISSION</button></div>{s.submittedAt && <p className="notice">Submitted {date(s.submittedAt)} / {s.truth ? 'TRUTH CONFIRMED' : 'THEORY AWAITING MARSHAL REVIEW'} / {s.accuracy} provisional points</p>}</section></>; }
-function MediaPanel({ data, act, load, admin = false }: Any) { const [progress, setProgress] = useState(-1); const [preview, setPreview] = useState<Any>(null); const [note, setNote] = useState(''); return <section className="panel"><div className="sectiontitle"><h2>{admin ? 'MEDIA CONTROL' : 'RECOVERED MEDIA'}</h2><span>{data.media.length} FRAGMENTS</span></div>{!admin && <><p>MP3, WAV, M4A, MP4, WEBM, MOV Â· up to {data.settings.maxUploadMB} MB each Â· {data.settings.requiredUploads} required {data.settings.requireApproval ? 'with marshal approval' : ''}</p><label className="uploadlabel"><Upload size={24}/> UPLOAD BROADCAST FRAGMENT<input aria-label="Choose broadcast fragment" type="file" accept=".mp3,.wav,.m4a,.mp4,.webm,.mov" disabled={progress >= 0 || !!data.team.state.submittedAt} onChange={e => { const file = e.target.files?.[0]; if (!file)
+async function uploadMedia(file: File, data: Any, load: () => Promise<void>, setProgress: (value: number) => void) {
+    if (file.size > data.settings.maxUploadMB * 1024 * 1024) { toast.error('File exceeds upload limit.'); return; }
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    const types: Record<string, string> = { mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime' };
+    if (!ext || !types[ext]) { toast.error('Use MP3, WAV, M4A, MP4, WEBM or MOV.'); return; }
+    const client = getBrowserSupabase();
+    if (!client) { toast.error('Supabase Storage is not configured.'); return; }
+    setProgress(0);
+    try {
+        const signedResponse = await fetch('/api/media', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: file.name, mime: types[ext], size: file.size }) });
+        const signed: Any = await signedResponse.json();
+        if (!signedResponse.ok) throw Error(signed.error);
+        const { error } = await client.storage.from('media').uploadToSignedUrl(signed.path, signed.token, file, { contentType: types[ext] });
+        if (error) throw error;
+        setProgress(100);
+        const finalized = await fetch('/api/media/finalize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: signed.id }) });
+        const result: Any = await finalized.json();
+        if (!finalized.ok) throw Error(result.error);
+        toast.success('FRAGMENT ARCHIVED.');
+        await load();
+    } catch (error: Any) { toast.error(error.message || 'UPLOAD FAILED. Select the file to retry.'); }
+    finally { setProgress(-1); }
+}function MediaPanel({ data, act, load, admin = false }: Any) { const [progress, setProgress] = useState(-1); const [preview, setPreview] = useState<Any>(null); const [note, setNote] = useState(''); return <section className="panel"><div className="sectiontitle"><h2>{admin ? 'MEDIA CONTROL' : 'RECOVERED MEDIA'}</h2><span>{data.media.length} FRAGMENTS</span></div>{!admin && <><p>MP3, WAV, M4A, MP4, WEBM, MOV Â· up to {data.settings.maxUploadMB} MB each Â· {data.settings.requiredUploads} required {data.settings.requireApproval ? 'with marshal approval' : ''}</p><label className="uploadlabel"><Upload size={24}/> UPLOAD BROADCAST FRAGMENT<input aria-label="Choose broadcast fragment" type="file" accept=".mp3,.wav,.m4a,.mp4,.webm,.mov" disabled={progress >= 0 || !!data.team.state.submittedAt} onChange={e => { const file = e.target.files?.[0]; if (!file)
     return; if (file.size > data.settings.maxUploadMB * 1024 * 1024) {
     toast.error('File exceeds upload limit.');
     return;
-} const xhr = new XMLHttpRequest(); xhr.open('POST', '/api/media'); setProgress(0); xhr.upload.onprogress = e => { if (e.lengthComputable)
-    setProgress(Math.round(e.loaded / e.total * 100)); }; xhr.onload = () => { setProgress(-1); try {
-    const d = JSON.parse(xhr.responseText);
-    if (xhr.status >= 400)
-        throw Error(d.error);
-    toast.success('FRAGMENT ARCHIVED.');
-    load();
-}
-catch (e: Any) {
-    toast.error(e.message);
-} }; xhr.onerror = () => { setProgress(-1); toast.error('UPLOAD FAILED. Select the file to retry.'); }; const body = new FormData(); body.append('file', file); xhr.send(body); e.target.value = ''; }}/></label>{progress >= 0 && <><Progress value={progress}/><p aria-live="polite">{progress === 100 ? 'PROCESSINGâ€¦' : 'UPLOADINGâ€¦ ' + progress + '%'}</p></>}</>}{data.media.length === 0 ? <p className="muted">NO FRAGMENTS ARCHIVED</p> : data.media.map((m: Any) => <div className="mediarow" key={m.id}><div><b>{m.name}</b><small>{admin ? (data.teams.find((t: Any) => t.id === m.team_id)?.code || '') + ' / ' : ''}{(m.size / 1048576).toFixed(1)} MB / {m.status}</small>{m.note && <p>{m.note}</p>}</div><div className="toolbar"><button className="quiet" onClick={() => { setPreview(m); setNote(m.note); }}>PREVIEW</button><a href={'/api/media?id=' + m.id + '&download=1'}>DOWNLOAD</a>{!admin && !data.team.state.submittedAt && <button className="quiet" onClick={async () => { const r = await fetch('/api/media?id=' + m.id, { method: 'DELETE' }); if (!r.ok) {
+} if (file) void uploadMedia(file, data, load, setProgress); e.target.value = ''; }}/></label>{progress >= 0 && <><Progress value={progress}/><p aria-live="polite">{progress === 100 ? 'PROCESSINGâ€¦' : 'UPLOADINGâ€¦ ' + progress + '%'}</p></>}</>}{data.media.length === 0 ? <p className="muted">NO FRAGMENTS ARCHIVED</p> : data.media.map((m: Any) => <div className="mediarow" key={m.id}><div><b>{m.name}</b><small>{admin ? (data.teams.find((t: Any) => t.id === m.team_id)?.code || '') + ' / ' : ''}{(m.size / 1048576).toFixed(1)} MB / {m.status}</small>{m.note && <p>{m.note}</p>}</div><div className="toolbar"><button className="quiet" onClick={() => { setPreview(m); setNote(m.note); }}>PREVIEW</button><a href={'/api/media?id=' + m.id + '&download=1'}>DOWNLOAD</a>{!admin && !data.team.state.submittedAt && <button className="quiet" onClick={async () => { const r = await fetch('/api/media?id=' + m.id, { method: 'DELETE' }); if (!r.ok) {
     toast.error(((await r.json()) as any).error);
     return;
 } await load(); }}>REMOVE</button>}</div></div>)}<Dialog open={!!preview} onOpenChange={v => { if (!v)

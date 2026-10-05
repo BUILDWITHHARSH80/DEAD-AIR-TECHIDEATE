@@ -5,7 +5,7 @@ import { notifyChange } from './supabase-admin';
 type BoundStatement = { sql: string; args: unknown[] };
 type RunResult = { meta: { changes: number }; rows: Record<string, unknown>[] };
 
-const tableNames = 'teams|sessions|settings|documents|challenges|media|activity|limits|file_unlocks|leaderboard_v';
+const tableNames = 'teams|sessions|settings|documents|challenges|media|media_upload_intents|activity|limits|file_unlocks|leaderboard_v';
 
 function qualify(sql: string) {
   return sql.replace(new RegExp(`\\b(FROM|JOIN|INTO|UPDATE|TABLE)\\s+(${tableNames})\\b`, 'gi'), (_all, op, table) => `${op} meridian.${table}`);
@@ -44,7 +44,7 @@ function mutations(sql: string) {
 
 function changeKind(sql: string) {
   const table = sql.match(/\b(?:INTO|UPDATE|FROM)\s+(?:meridian\.)?([a-z_]+)/i)?.[1]?.toLowerCase();
-  return table === 'file_unlocks' ? 'file_unlock' : table || 'game_state';
+  return table === 'file_unlocks' ? 'file_unlock' : table === 'media_upload_intents' ? 'media_upload' : table || 'game_state';
 }
 
 async function runQuery(client: any, statement: BoundStatement): Promise<RunResult> {
@@ -81,9 +81,17 @@ function createDb(client: any) {
       if (mutation) await notifyChange(changeKind(mutation.sql));
       return results;
     },
-    transaction: async <T>(callback: (tx: { run: (statement: BoundStatement) => Promise<RunResult> }) => Promise<T>) => {
-      const result = await client.begin((tx: any) => callback({ run: statement => runQuery(tx, statement) }));
-      await notifyChange('team');
+    transaction: async <T>(callback: (tx: {
+      run: (statement: BoundStatement) => Promise<RunResult>;
+      one: (sql: string, ...args: unknown[]) => Promise<Record<string, any> | undefined>;
+      all: (sql: string, ...args: unknown[]) => Promise<Record<string, any>[]>;
+    }) => Promise<T>, kind = 'team') => {
+      const result = await client.begin((tx: any) => callback({
+        run: statement => runQuery(tx, statement),
+        one: async (query, ...args) => (await runQuery(tx, { sql: query, args })).rows[0],
+        all: async (query, ...args) => (await runQuery(tx, { sql: query, args })).rows,
+      }));
+      await notifyChange(kind);
       return result;
     },
   };

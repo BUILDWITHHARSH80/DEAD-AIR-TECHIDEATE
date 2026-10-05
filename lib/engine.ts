@@ -84,6 +84,21 @@ export async function leaderboardRows() {
         unlock_times: Object.fromEntries(Object.entries(row.unlock_times || {}).map(([id, value]) => [id, value ? new Date(String(value)).getTime() : null])),
     }));
 }
+export async function reserveMediaUpload(teamId: string, name: string, mime: string, size: number) {
+    const id = uuid();
+    const path = `${teamId}/${id}`;
+    const expires = Date.now() + 2 * 60 * 60 * 1000;
+    await db().transaction(async tx => {
+        const teamRow = await tx.one('SELECT state FROM teams WHERE id=? FOR UPDATE', teamId);
+        if (!teamRow) fail('Team not found.', 404);
+        if (parseJson(teamRow.state).submittedAt) fail('Media is locked after final submission. Ask a marshal to review it.', 409);
+        await tx.run(stmt('DELETE FROM media_upload_intents WHERE team_id=? AND expires<?', teamId, Date.now()));
+        const count = await tx.one('SELECT (SELECT count(*) FROM media WHERE team_id=?) + (SELECT count(*) FROM media_upload_intents WHERE team_id=? AND expires>?) AS total', teamId, teamId, Date.now());
+        if (Number(count?.total || 0) >= 12) fail('Archive holds at most 12 fragments per team. Remove one before uploading.');
+        await tx.run(stmt('INSERT INTO media_upload_intents(id,team_id,name,mime,size,storage_path,expires) VALUES(?,?,?,?,?,?,?)', id, teamId, name.slice(0, 180), mime, size, path, expires));
+    }, 'media_upload');
+    return { id, path, expires };
+}
 export async function commission() { if (await one('SELECT id FROM settings WHERE id=?', 'event'))
     return null; const statements = [stmt('INSERT INTO settings(id,value) VALUES(?,?::jsonb)', 'event', JSON.stringify(defaultSettings)), ...initialDocuments.map(d => { const { passkey, ...data } = d; return stmt('INSERT INTO documents(id,data,passkey) VALUES(?,?::jsonb,?)', d.id, JSON.stringify(data), passkey); }), ...initialChallenges.map(c => stmt('INSERT INTO challenges(id,data) VALUES(?,?::jsonb)', c.id, JSON.stringify(c))), logStatement('admin', null, 'COMMISSION', '8 documents and 8 stations seeded; no teams registered')]; await db().batch(statements); return []; }
 export function normalizeTeamCode(value: unknown) { let code = String(value ?? '').trim().toUpperCase().replace(/\s+/g, ' '); const numbered = code.match(/^TEAM\s*0?(\d+)$/); if (numbered) code = 'TEAM ' + String(Number(numbered[1])).padStart(2, '0'); return code; }
