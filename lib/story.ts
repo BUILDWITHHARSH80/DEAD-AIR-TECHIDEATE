@@ -81,7 +81,7 @@ export const initialDocuments = [
         "classification": "FACILITY SCHEMATIC / EVIDENCE",
         "passkey": "7184",
         "description": "A maintenance drawing contradicts the public map.",
-        "content": "FACILITY SCHEMATIC / EVIDENCE\nThe true route: Studio A â†’ Archive Shelving â†’ Service Corridor â†’ Latch Z-0.\nZ-0 has no exterior doors. It is a sealed box with independent ventilation.\n\nCRITICAL CATCH: If you are comparing the badge logs to the security video, you must correct the time. Camera 3 time = Master Clock MINUS 19 seconds. The public floor plan calls this space a \"structural void\". Itâ€™s a blind spot.",
+        "content": "FACILITY SCHEMATIC / EVIDENCE\nThe true route: Studio A → Archive Shelving → Service Corridor → Latch Z-0.\nZ-0 has no exterior doors. It is a sealed box with independent ventilation.\n\nCRITICAL CATCH: If you are comparing the badge logs to the security video, you must correct the time. Camera 3 time = Master Clock MINUS 19 seconds. The public floor plan calls this space a \"structural void\". Itâ€™s a blind spot.",
         "clues": [
             "Camera 3 is nineteen seconds behind.",
             "The hidden route stays inside the station."
