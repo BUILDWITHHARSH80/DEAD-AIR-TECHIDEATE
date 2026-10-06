@@ -1,92 +1,32 @@
-# DEAD AIR — Full-Stack Event System
+# DEAD AIR / Radio Meridian
 
-This is a complete local full-stack starting point based on the supplied DEAD AIR technical brief.
+A private, browser based investigation game. The application uses the Vinext/React frontend, a Cloudflare Worker API, D1 for event state, and R2 for private team media.
 
-## Stack
-- Backend: Python + FastAPI + SQLAlchemy + SQLite
-- Frontend: React + Vite
-- Authentication: JWT
-- Password hashing: bcrypt/passlib
-- Evidence storage: local filesystem
-- ECHO: server-controlled endpoint with a safe local fallback (swap in an AI API key later)
+## Local setup
 
-## Python 3.14 compatibility
-This version is configured for Python 3.14. The original package pins were too old for Python 3.14 and could force `pydantic-core` to compile from Rust source. The updated requirements use Pydantic 2.13.5 and FastAPI 0.141.1, which have Python 3.14 support.
+Requirements: Node.js 22.13 or newer and npm.
 
-## Run on Windows
+1. Install dependencies with `npm install`.
+2. Copy `.env.example` to `.env` and set a long, private `ADMIN_PASSWORD`.
+3. Apply the local D1 migrations with `npm run db:migrate:local`.
+4. Start the app with `npm run dev` and open the local URL printed by the dev server.
+5. Sign in at `/admin/login` as `control` with the configured password, then choose **COMMISSION STATION** once. Commissioning creates the event settings, documents, challenges, and audit entry; it intentionally creates no teams.
+6. Open the Teams tab and register teams individually or with CSV. A CSV may have a header (`id,name,access code`) or rows in `id,name,access code` order. Leave an ID or access code empty to generate it. Generated or supplied access codes are shown once after creation; save and distribute them privately.
 
-### Terminal 1 — backend
-```powershell
-cd backend
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
+Local D1 data and R2 objects are stored under `.wrangler/` and are excluded from Git. Do not commit `.env` or distribute the private team roster publicly.
 
-If PowerShell blocks activation:
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\.venv\Scripts\Activate.ps1
-```
+## Event operations
 
-### Terminal 2 — frontend
-```powershell
-cd frontend
-npm install
-npm run dev
-```
+The control room manages the transmission timer, team roster, challenges, documents, media review, ECHO oversight, activity, and event settings. Team IDs are unique and may be custom values such as `TEAM 01` or `FIELD_WEST`. Team names are unique without regard to letter case. Access codes must contain 8–64 characters. Setting a new code signs out that team’s active sessions. Deleting a team removes its sessions, activity, media records, and private media objects; the deletion is recorded in the admin activity log.
 
-Open:
-http://localhost:5173
+Team members sign in with their team ID, registered name, and access code at `/login`. Admin and participant sessions use separate routes.
 
-Backend API:
-http://localhost:8000/docs
+## Commands
 
-## Demo credentials
-Team:
-- Team ID: MDN-01
-- Password: deadair123
+- `npm run dev` — start the local development server.
+- `npm run build` — build the production app.
+- `npm run typecheck` — check TypeScript types.
+- `npm run db:migrate:local` — apply D1 migrations to the local database.
+- `npm run test:integration` — run the end-to-end API/game suite against the disposable server configured by `TEST_URL` (defaults to `http://localhost:5173`). The suite expects a fresh local D1 database and a local `.env` file.
 
-Admin:
-- Username: admin
-- Password: admin123
-
-Other seeded teams use the same team password.
-
-## What is already server-backed
-- Team login
-- One-active-session check for teams
-- Admin login
-- SQLite persistence
-- Team dashboard data
-- Challenge answers and attempts
-- Automatic challenge scoring
-- Evidence unlock records
-- ECHO prompt counting and server-side 5-prompt enforcement
-- Final submission lock + duplicate prevention
-- Admin team/room view
-- Admin event timer controls
-- Leaderboard
-- Finale score endpoint
-- Evidence upload endpoint
-
-## Before the real event
-The remaining production-hardening work should include:
-1. PostgreSQL/Supabase instead of SQLite for multi-machine deployment.
-2. Redis/WebSocket real-time updates if live admin dashboards need push updates.
-3. Strong random secret via environment variable.
-4. Real user/team provisioning instead of seed credentials.
-5. Authoritative encrypted case data on the server.
-6. Real ECHO provider API call with server-side system prompt and rate limits.
-7. Authoritative timeline answer + scoring rules.
-8. Evidence file access authorization rather than public static mounting.
-9. HTTPS, reverse proxy, backups, audit logging and error monitoring.
-10. Load testing for 40 concurrent teams before the event.
-
-## Important brief alignment
-The supplied brief requires React/Tailwind frontend, a simple backend, storage for teams/users/answers/scores/unlocked files/ECHO/timings/submissions, server-side timer, auto-save, automatic scoring, duplicate prevention, prompt enforcement, evidence unlocking, admin override, mobile admin and backup/manual scoring.
-
-
-### Python 3.14 note
-The backend no longer depends on Passlib/bcrypt. Passwords are hashed with Python's built-in PBKDF2-HMAC-SHA256, avoiding the bcrypt backend initialization problem on Python 3.14.
+The `public/studio.png` file is a local placeholder. Replace it with the original studio image asset before publishing if that reference asset is available.
