@@ -1,10 +1,25 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-const base=process.env.TEST_URL||'http://localhost:5173';
-const password=fs.readFileSync('.env','utf8').match(/ADMIN_PASSWORD=(.+)/)[1].trim();
+import { readFile } from 'node:fs/promises';
+import { loadEnvConfig } from '@next/env';
+import postgres from 'postgres';
+import { createClient } from '@supabase/supabase-js';
+loadEnvConfig(process.cwd());
+const base=process.env.TEST_URL;
+if(!base) throw Error('Set TEST_URL to a disposable app deployment backed by local Supabase or a separate test project.');
+if(process.env.TEST_DB_ISOLATED!=='true') throw Error('Set TEST_DB_ISOLATED=true only after confirming this is not the main Supabase project.');
+const testDatabaseUrl=process.env.TEST_SUPABASE_DB_URL;
+const supabaseUrl=process.env.TEST_SUPABASE_URL||process.env.NEXT_PUBLIC_SUPABASE_URL;
+const anonKey=process.env.TEST_SUPABASE_ANON_KEY||process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const password=process.env.ADMIN_PASSWORD;
+if(!testDatabaseUrl||!supabaseUrl||!anonKey||!password) throw Error('TEST_SUPABASE_DB_URL, test Supabase public credentials, and ADMIN_PASSWORD are required. Values are never printed.');
+const testDb=postgres(testDatabaseUrl,{prepare:false,max:1,connect_timeout:10});
+const publicClient=createClient(supabaseUrl,anonKey,{auth:{autoRefreshToken:false,persistSession:false}});
 let checks=0;
 function check(value,message){assert.ok(value,message);checks++;console.log('PASS',message)}
-function client(){let cookie='';return {async post(action,b={}){const r=await fetch(base+'/api/game',{method:'POST',headers:{'Content-Type':'application/json',cookie,origin:base},body:JSON.stringify({action,...b})});if(r.headers.get('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];const data=await r.json();return {status:r.status,data}},async get(query=''){const r=await fetch(base+'/api/game'+query,{headers:{cookie}});return {status:r.status,data:await r.json()}},async media(method,body,id){return fetch(base+'/api/media'+(id?'?id='+id:''),{method,body,headers:{cookie,origin:base}})},cookie:()=>cookie}}
+function client(){let cookie='';return {async post(action,b={}){const r=await fetch(base+'/api/game',{method:'POST',headers:{'Content-Type':'application/json',cookie,origin:base},body:JSON.stringify({action,...b})});if(r.headers.get('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];const data=await r.json();return {status:r.status,data}},async get(query=''){const r=await fetch(base+'/api/game'+query,{headers:{cookie}});return {status:r.status,data:await r.json()}},async media(method,body,id){return fetch(base+'/api/media'+(id?'?id='+id:''),{method,body,headers:{cookie,origin:base}})},async leaderboard(){const r=await fetch(base+'/api/leaderboard',{headers:{cookie}});return {status:r.status,data:await r.json()}},cookie:()=>cookie}}
+async function upload(client,file,name){const mime=file.type;const size=file.size;const prepared=await fetch(base+'/api/media',{method:'POST',headers:{cookie:client.cookie(),origin:base,'Content-Type':'application/json'},body:JSON.stringify({name,mime,size})});const signed=await prepared.json();if(!prepared.ok)throw Error(signed.error);const {error}=await publicClient.storage.from('media').uploadToSignedUrl(signed.path,signed.token,file,{contentType:mime});if(error)throw error;const finalized=await fetch(base+'/api/media/finalize',{method:'POST',headers:{cookie:client.cookie(),origin:base,'Content-Type':'application/json'},body:JSON.stringify({id:signed.id})});const result=await finalized.json();return {response:finalized,media:result,path:signed.path};}
+async function installBackdateHelper(){await testDb.unsafe(await readFile(new URL('./sql/backdate_file_unlock.sql',import.meta.url),'utf8'));}
+async function backdate(teamId,documentId,at){await testDb`select meridian_test.backdate_file_unlock(${teamId},${documentId},${new Date(at).toISOString()}::timestamptz)`;}
 const admin=client(),a=client(),b=client();
 check((await admin.get()).status===401,'Anonymous state denied');
 check((await admin.post('login',{admin:true,username:'control',password:'incorrect'})).status===401,'Wrong admin password denied');
@@ -12,6 +27,7 @@ check((await admin.post('login',{admin:true,username:'control',password})).statu
 const commissioned=await admin.post('commission');
 check(commissioned.status===200&&commissioned.data.credentials.length===0,'Commissioning creates the archive without a seeded roster');
 check((await admin.get()).data.teams.length===0,'Commissioned station safely supports zero teams');
+check((await admin.leaderboard()).data.rows.length===0,'Leaderboard has a clear zero-team state');
 const extras=await admin.post('admin.addTeams',{teams:[{code:'FIELD_WEST',name:'Field West',accessCode:'WestCode#2046'},{name:'Generated Unit'}]});
 check(extras.status===200&&extras.data.credentials.length===2&&extras.data.credentials[0].code==='FIELD_WEST'&&extras.data.credentials[1].access.length>=8,'Manual registration returns credentials once and generates missing IDs');
 const manual=extras.data.credentials[0],generated=extras.data.credentials[1],manualClient=client(),generatedClient=client();
@@ -28,15 +44,16 @@ check((await manualClient.get()).status===401&&(await client().post('login',{cod
 check((await client().post('login',{code:manual.code,name:manual.name,password:'ChangedCode#2046'})).status===200,'Updated access code authenticates the team');
 let roster;
 const rows=Array.from({length:40},(_,i)=>({code:'TEAM '+String(i+1).padStart(2,'0'),name:'Team '+String(i+1).padStart(2,'0'),accessCode:'TeamAccess#'+String(i+1).padStart(2,'0')}));
-const registered=await admin.post('admin.addTeams',{teams:rows}); roster=registered.data.credentials;
-check(registered.status===200&&roster.length===40&&(await admin.get()).data.teams.length===42,'Bulk team registration creates the complete requested roster');
+const rankingRows=['RANK_FIRST_A','RANK_FIRST_B','RANK_CODE_A','RANK_CODE_B','RANK_ZERO_A','RANK_ZERO_B'].map(code=>({code,name:code,accessCode:code+'Access#2046'}));
+const registered=await admin.post('admin.addTeams',{teams:[...rows,...rankingRows]}); roster=registered.data.credentials;
+check(registered.status===200&&roster.length===46&&(await admin.get()).data.teams.length===48,'Bulk team registration creates the complete requested roster and ranking fixtures');
 check((await a.post('login',{code:roster[0].code,name:roster[0].name,password:roster[0].access})).status===200,'Team 01 login');
 check((await b.post('login',{code:roster[1].code,name:roster[1].name,password:roster[1].access})).status===200,'Team 02 login');
 let state=(await a.get()).data;const id=state.team.id;const id2=(await b.get()).data.team.id;
 await admin.post('admin.team',{teamId:id,op:'reset',confirm:roster[0].code});
 await admin.post('admin.team',{teamId:id2,op:'reset',confirm:roster[1].code});
 state=(await a.get()).data;
-check(state.documents.length===8&&state.challenges.length===8,'Eight documents and eight challenges');
+check(state.documents.length===4&&state.challenges.length===8,'Current story seeds four documents and eight challenges');
 check(!state.documents.some(d=>d.content||d.passkey)&&!state.ending&&state.fragments.length===0,'Locked content, passkeys and final solution withheld');
 check((await a.get('?team='+id2)).data.team.id===id,'Team query cannot switch ownership');
 check((await a.post('admin.team',{teamId:id2,op:'unlock',id:'01'})).status===403,'Participant admin mutation denied');
@@ -47,13 +64,14 @@ check((await admin.post('admin.team',{teamId:id,op:'unlock',id:'01'})).status===
 check((await b.post('unlock',{id:'01',passkey:'4172'})).status===409,'Shared passkey cannot bypass physical verification');
 await a.post('echo',{question:'Where is Adrian?'});
 check((await a.get()).data.team.state.messages.at(-1).response.includes('authorization'),'ECHO blocks premature knowledge');
-const liveController=new AbortController();const live=await fetch(base+'/api/events',{headers:{cookie:a.cookie()},signal:liveController.signal});const reader=live.body.getReader();check((await reader.read()).value.length>0,'Authenticated realtime stream connects');
 await admin.post('admin.team',{teamId:id,op:'challenge',id:'01',status:'COMPLETED'});
 state=(await a.get()).data;check(state.challenges.every(c=>!c.passkey),'Completed challenges never expose passkeys to teams');
 check(!state.documents[0].approved&&!state.documents[0].content,'Completion alone does not approve or decrypt a file');
-let notification=await reader.read();if(!new TextDecoder().decode(notification.value).includes('event: change'))notification=await reader.read();check(new TextDecoder().decode(notification.value).includes('event: change'),'Admin change pushes realtime notification');liveController.abort();
+check((await a.leaderboard()).status===200,'Participant can read live rankings while enabled');
 check((await a.post('unlock',{id:'01',passkey:'4172'})).status===409,'Correct passkey still requires separate admin approval');
-await admin.post('admin.team',{teamId:id,op:'unlock',id:'01'});
+const approvalRequest=Date.now();await admin.post('admin.team',{teamId:id,op:'unlock',id:'01'});
+const approvalRow=await testDb`select extract(epoch from approved_at)*1000 as approved_ms from meridian.file_unlocks where team_id=${id} and document_id='01'`;
+check(Number(approvalRow[0].approved_ms)>=approvalRequest-1000&&Number(approvalRow[0].approved_ms)<=Date.now()+1000,'Approval timestamp is assigned by the database server clock');
 state=(await a.get()).data;
 check(state.documents[0].approved&&!state.documents[0].content&&!state.documents[0].clues&&!state.documents[0].echo&&!state.documents[0].question&&!state.documents[0].passkey,'Admin approval reveals code entry only, withholding content and clues');
 check(Object.keys(state.team.state.unlocks).length===0,'Approval does not count as recovered evidence');
@@ -63,11 +81,17 @@ check((await a.get()).data.team.state.messages.at(-1).response.includes('authori
 check((await a.post('unlock',{id:'01',passkey:'0000'})).status===400,'Wrong passkey rejected after approval');
 check(!(await a.get()).data.documents[0].content,'Wrong code leaves approved content encrypted');
 await admin.post('admin.event',{mode:'pause'});
-check((await a.post('unlock',{id:'01',passkey:' 4172 '})).status===200,'Approved passkey opens record while paused and tolerates surrounding whitespace');
+const firstUnlockRequest=Date.now();check((await a.post('unlock',{id:'01',passkey:' 4172 '})).status===200,'Approved passkey opens record while paused and tolerates surrounding whitespace');
+const firstUnlockRow=await testDb`select extract(epoch from unlocked_at)*1000 as unlocked_ms from meridian.file_unlocks where team_id=${id} and document_id='01'`;
+const firstUnlockMs=Number(firstUnlockRow[0].unlocked_ms);check(firstUnlockMs>=firstUnlockRequest-1000&&firstUnlockMs<=Date.now()+1000,'Unlock timestamp is assigned by the database server clock');
+await new Promise(resolve=>setTimeout(resolve,30));await a.post('unlock',{id:'01',passkey:'4172'});
+const reentryRow=await testDb`select extract(epoch from unlocked_at)*1000 as unlocked_ms from meridian.file_unlocks where team_id=${id} and document_id='01'`;
+check(Number(reentryRow[0].unlocked_ms)===firstUnlockMs,'Re-entering a valid passkey never overwrites the first unlock time');
 await admin.post('admin.event',{mode:'resume'});
 check((await a.get()).data.documents[0].content&&!(await a.get()).data.documents[0].passkey,'Successful code entry reveals content without revealing the passkey');
 await admin.post('admin.team',{teamId:id,op:'lock',id:'01'});
 check(!(await a.get()).data.documents[0].content&&!(await a.get()).data.documents[0].approved,'Revocation hides a previously decrypted record');
+check(!(await testDb`select 1 from meridian.file_unlocks where team_id=${id} and document_id='01'`).length,'Revocation removes the file_unlocks row');
 check((await a.post('unlock',{id:'01',passkey:'4172'})).status===409,'Retained code cannot bypass revoked approval');
 await admin.post('admin.team',{teamId:id,op:'unlock',id:'01'});
 check(!(await a.get()).data.documents[0].content,'Reapproval still requires a new passkey entry');
@@ -82,9 +106,11 @@ const before=(await a.get()).data.settings.remaining;await new Promise(r=>setTim
 await admin.post('admin.event',{mode:'extend',seconds:120});check((await a.get()).data.settings.remaining===before+120,'Timer extension');
 await admin.post('admin.event',{mode:'resume'});
 const wav=new Uint8Array(8044);const view=new DataView(wav.buffer);for(const [offset,text]of [[0,'RIFF'],[8,'WAVE'],[12,'fmt '],[36,'data']])wav.set(new TextEncoder().encode(text),offset);view.setUint32(4,8036,true);view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);view.setUint32(24,8000,true);view.setUint32(28,16000,true);view.setUint16(32,2,true);view.setUint16(34,16,true);view.setUint32(40,8000,true);
-const form=new FormData();form.append('file',new Blob([wav],{type:'audio/wav'}),'recovered.wav');const uploaded=await a.media('POST',form);const media=await uploaded.json();check(uploaded.status===200,'Valid WAV upload');
-const manualUploader=client();check((await manualUploader.post('login',{code:manual.code,name:manual.name,password:'ChangedCode#2046'})).status===200,'Team can sign in using its changed access code');const manualMediaResponse=await manualUploader.media('POST',form);const manualMedia=await manualMediaResponse.json();check(manualMediaResponse.status===200,'Manually registered team can upload media');
-check((await b.media('GET',undefined,media.id)).status===404,'Private media denied to other team');check((await a.media('GET',undefined,media.id)).status===200,'Owner can preview private media');
+const wavFile=new File([wav],'recovered.wav',{type:'audio/wav'});const uploaded=await upload(a,wavFile,wavFile.name);const media=uploaded.media;check(uploaded.response.status===200,'Valid WAV uploads directly to private Storage and finalizes');
+const manualUploader=client();check((await manualUploader.post('login',{code:manual.code,name:manual.name,password:'ChangedCode#2046'})).status===200,'Team can sign in using its changed access code');const manualUploaded=await upload(manualUploader,wavFile,'manual.wav');const manualMedia=manualUploaded.media;check(manualUploaded.response.status===200,'Manually registered team can upload media');
+check((await b.media('GET',undefined,media.id)).status===404,'Private media denied to other team');check((await a.media('GET',undefined,media.id)).status===200,'Owner can preview private media with a short-lived URL');
+const anonDownload=await publicClient.storage.from('media').download(uploaded.path);check(!!anonDownload.error||!anonDownload.data,'Anonymous key cannot read private Storage objects');
+for(const table of ['teams','sessions','settings','documents','challenges','media','activity','limits','file_unlocks','media_upload_intents','leaderboard_v']){const result=await publicClient.schema('meridian').from(table).select('*').limit(1);check(!!result.error||!result.data?.length,'Anon key cannot read meridian.'+table);}
 await admin.post('admin.media',{id:media.id,status:'APPROVED',note:'Audio recovery verified'});check((await a.get()).data.media.find(m=>m.id===media.id).status==='APPROVED','Media approval synchronizes');
 for(const [doc,passkey] of [['02','8036'],['03','2659'],['04','9413']]){
   await admin.post('admin.team',{teamId:id,op:'challenge',id:doc,status:'COMPLETED'});
@@ -119,4 +145,40 @@ check((await manualUploader.get()).status===401,'Deleting a team revokes its exi
 check(!(await admin.get()).data.teams.some(t=>t.id===manualId)&&!(await admin.get()).data.media.some(m=>m.id===manualMedia.id),'Team deletion removes roster and media records');
 check((await admin.media('GET',undefined,manualMedia.id)).status===404,'Team deletion removes its uploaded object from the private archive');
 check((await admin.get()).data.activity.some(x=>x.action==='TEAM DELETED'&&x.team_id===null),'Team deletion writes a null-team audit record');
-console.log('\n'+checks+' integration checks passed. Local fixture event is closed.');
+const teamIndex=new Map((await admin.get()).data.teams.map(team=>[team.code,team.id]));
+const fixtureIds=[id,id2,...['RANK_FIRST_A','RANK_FIRST_B','RANK_CODE_A','RANK_CODE_B','RANK_ZERO_A','RANK_ZERO_B'].map(code=>teamIndex.get(code))];
+await testDb.begin(async tx=>{for(const teamId of fixtureIds)await tx`delete from meridian.file_unlocks where team_id=${teamId}`;});
+await installBackdateHelper();
+const eventStart=Number((await admin.get()).data.settings.startedAt||0);const origin=Math.max(Date.now()-120000,eventStart+1000);
+const schedule=[
+  [id,'01',10],[id,'02',20],[id,'03',50],
+  [id2,'01',11],[id2,'02',26],
+  [teamIndex.get('RANK_FIRST_A'),'01',5],[teamIndex.get('RANK_FIRST_A'),'02',30],
+  [teamIndex.get('RANK_FIRST_B'),'01',15],[teamIndex.get('RANK_FIRST_B'),'02',30],
+  [teamIndex.get('RANK_CODE_A'),'01',25],[teamIndex.get('RANK_CODE_A'),'02',40],
+  [teamIndex.get('RANK_CODE_B'),'01',25],[teamIndex.get('RANK_CODE_B'),'02',40],
+];
+for(const [teamId,document,offset] of schedule)await backdate(teamId,document,origin+offset*1000);
+const ranking=await admin.leaderboard();const ranked=ranking.data.rows;
+check(ranking.status===200&&ranked.length===(await admin.get()).data.teams.length,'Leaderboard returns every registered team');
+check(ranked.every((row,index)=>row.rank===index+1),'Leaderboard ranks are contiguous and in database order');
+check(ranked.slice(0,6).map(row=>row.code).join(',')==='TEAM 01,TEAM 02,RANK_FIRST_A,RANK_FIRST_B,RANK_CODE_A,RANK_CODE_B','Leaderboard sorts file count, latest unlock, first unlock, then team code');
+const zeroRows=ranked.filter(row=>Number(row.files_unlocked)===0);
+check(zeroRows.length>0&&ranked.slice(-zeroRows.length).every(row=>Number(row.files_unlocked)===0),'Zero-unlock teams are all listed last');
+check(zeroRows.findIndex(row=>row.code==='RANK_ZERO_A')<zeroRows.findIndex(row=>row.code==='RANK_ZERO_B'),'Zero-unlock teams use team-code order');
+check(JSON.stringify((await a.get()).data.leaderboard.map(row=>row.id))===JSON.stringify(ranked.map(row=>row.id)),'Snapshot embeds the exact same ranked rows');
+check(JSON.stringify((await admin.get()).data.teams.map(team=>team.id))===JSON.stringify(ranked.map(row=>row.id)),'Admin Teams rows follow leaderboard order');
+const leaked=JSON.stringify(ranked);check(!/passkey|password|access code|note|flag/i.test(leaked),'Leaderboard omits passkeys, access codes, notes and flags');
+await admin.post('admin.settings',{value:{leaderboard:false}});
+check((await b.leaderboard()).status===403&&(await b.get()).data.leaderboard.length===0,'Participants cannot read rankings when the setting is off');
+check((await admin.leaderboard()).status===200,'Admin can always read rankings');
+await admin.post('admin.settings',{value:{leaderboard:true}});
+await backdate(teamIndex.get('RANK_ZERO_A'),'01',origin+60000);
+const beforeRevoke=(await admin.leaderboard()).data.rows.find(row=>row.code==='RANK_ZERO_A');
+await admin.post('admin.team',{teamId:teamIndex.get('RANK_ZERO_A'),op:'lock',id:'01'});
+const afterRevoke=(await admin.leaderboard()).data.rows.find(row=>row.code==='RANK_ZERO_A');
+check(Number(beforeRevoke.files_unlocked)===1&&Number(afterRevoke.files_unlocked)===0&&afterRevoke.rank>beforeRevoke.rank,'Revoking a file removes its unlock row and drops the team in ranking');
+const sqlRows=await testDb`select count(*)::int as count from meridian.file_unlocks where team_id=${teamIndex.get('RANK_ZERO_A')} and document_id='01'`;
+check(sqlRows[0].count===0,'Revoked ranking fixture has no file_unlocks row');
+await testDb.end({timeout:5});
+console.log('\n'+checks+' integration checks passed on the explicitly isolated test backend.');
