@@ -2,9 +2,9 @@
 @import "tw-animate-css";
 @import "../vendor/shadcn-tailwind-4.13.0.css";
 
-/* Global transition for smooth UI interactions */
-*, *::before, *::after {
-  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+/* Keep motion on interactive controls; animating every node caused layout jank. */
+button, a, input, textarea, select, summary {
+  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
 }
 :root,.dark{--background:#111412;--foreground:#d6d4c8;--card:#181c19;--card-foreground:#d6d4c8;--popover:#181c19;--popover-foreground:#d6d4c8;--primary:#c5a66a;--primary-foreground:#111412;--secondary:#252b26;--secondary-foreground:#d6d4c8;--muted:#252b26;--muted-foreground:#98a097;--accent:#30382f;--accent-foreground:#e6e6d8;--destructive:#cf7063;--border:#343b33;--input:#444d42;--ring:#c5a66a;--radius:.15rem}
 *{box-sizing:border-box}body{margin:0;background:#111412;color:#d6d4c8;font:16px/1.6 Arial,sans-serif}button,input,textarea,select{font:inherit}button,a{touch-action:manipulation}button,.button{cursor:pointer;border:1px solid #c5a66a;background:#c5a66a;color:#141811;padding:10px 20px;display:inline-flex;align-items:center;gap:12px;font-size:14px;font-weight:600;letter-spacing:.05em;border-radius:0.4rem;box-shadow:0 2px 4px rgba(0,0,0,0.2)}

@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Radio, Lock, FileText, Activity, ChevronUp, ChevronDown, Volume2, VolumeX, ArrowRight, Check, Upload, Search } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui/dialog';
+import { Dossier } from '@/components/dossier';
 import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/components/ui/input-otp';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
@@ -176,15 +177,15 @@ function Files({ data, act, busy }: Any) {
                 <div className="filelabel"><span>FILE {d.id}</span>{d.content ? <Check size={18}/> : <Lock size={18}/>}</div><FileText size={35}/><h3>{d.title}</h3><p>{d.subtitle}</p><div className="redaction">{d.content ? 'ARCHIVE RECOVERED' : 'â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ  â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆ'}</div><small>{d.content ? 'OPEN RECORD →' : d.approved ? 'APPROVED / ENTER PASSKEY →' : 'AWAITING ADMIN APPROVAL'}</small>
             </button>)}
         </div></section>)}
-        <Dialog open={!!doc} onOpenChange={v => { if (!v) { setDoc(null); setPasskey(''); setCodeError(''); } }}><DialogContent className="modal document"><DialogTitle>FILE {current?.id} / {current?.title}</DialogTitle><DialogDescription>{current?.classification}</DialogDescription>
-            {current?.content ? <><p className="eyebrow">FILE DECRYPTED / {date(current.unlockedAt)}</p><div className="documentbody">{current.content}</div><p className="notice">UNRESOLVED / {current.question}</p></> : !current?.approved ? <><p>{current?.description}</p><p className="notice" role="status">AWAITING ADMIN APPROVAL</p><p>Complete the associated challenge. Collect your code from the marshal, then ask them to approve passkey entry for this file.</p></> : <form onSubmit={async e => {
+        <Dialog open={!!doc} onOpenChange={v => { if (!v) { setDoc(null); setPasskey(''); setCodeError(''); } }}><DialogContent className="modal document dossier-modal"><Dossier record={current || { id: '', title: '' }} state={current?.content ? 'recovered' : current?.approved ? 'approved' : 'pending'} unlockedAt={current?.unlockedAt ? date(current.unlockedAt) : undefined}>
+            {current?.content ? <><p className="eyebrow">FILE DECRYPTED / {date(current.unlockedAt)}</p><div className="documentbody dossier-transcript">{current.content}</div><p className="notice dossier-unresolved">UNRESOLVED / {current.question}</p></> : !current?.approved ? <div className="dossier-access"><p>{current?.description}</p><p className="notice" role="status">AWAITING ADMIN APPROVAL</p><p>Complete the associated challenge. Collect your code from the marshal, then ask them to approve passkey entry for this file.</p></div> : <form className="dossier-access" onSubmit={async e => {
                 e.preventDefault(); setCodeError('');
                 try { await act('unlock', { id: current.id, passkey }); setPasskey(''); }
                 catch (e: Any) { setCodeError(e.message); }
             }}><p>{current?.description}</p><p className="notice">ADMIN APPROVED / PASSKEY REQUIRED</p><label htmlFor="archive-passkey">ENTER 4-DIGIT PASSKEY</label><InputOTP id="archive-passkey" value={passkey} onChange={v => { setPasskey(v); setCodeError(''); }} disabled={busy} maxLength={4} pattern="[0-9]*" inputMode="numeric" aria-describedby={codeError ? 'archive-code-error' : 'archive-code-help'} aria-invalid={!!codeError}><InputOTPGroup>{[0, 1, 2, 3].map(i => <InputOTPSlot key={i} index={i} className="otp"/>)}</InputOTPGroup></InputOTP>
                 {codeError && <p id="archive-code-error" className="error" role="alert">{codeError}</p>}<button disabled={busy || passkey.length !== 4}>{busy ? 'AUTHENTICATINGâ€¦' : 'DECRYPT FILE'}</button><p id="archive-code-help" className="muted">Use the four-digit code handed to your team for this file. Approval alone does not reveal its contents.</p>
             </form>}
-        </DialogContent></Dialog>
+        </Dossier></DialogContent></Dialog>
     </>;
 }
 function Challenges({ data }: Any) { return <><h2>CHALLENGE STATIONS</h2><p>Move freely between stations. A marshal verifies each physical challenge; completion appears here automatically.</p><div className="challengegrid">{data.challenges.map((c: Any) => { const state = data.team.state.challenges[c.id]; const status = !c.enabled ? 'DISABLED' : state?.status || 'AVAILABLE'; const labels: Any = { 'AVAILABLE': 'SIGNAL AVAILABLE', 'IN PROGRESS': 'SIGNAL ACQUIRED', 'COMPLETED': 'COMPLETED âœ“', 'FAILED': 'ATTEMPT FAILED', 'LOCKED': 'ACCESS DENIED', 'DISABLED': 'STATION OFFLINE' }; return <section className="panel challenge" key={c.id}><div className="sectiontitle"><span className="eyebrow">STATION {c.id}</span><span className="status">{labels[status]}</span></div><h3>{c.name}</h3><p>{c.description}</p><small>{c.instructions}</small><div className="reward"><span>REWARD / FILE {c.document}</span><b>{status === 'COMPLETED' ? 'COLLECT CODE FROM MARSHAL' : 'AWAITING VERIFICATION'}</b></div>{state?.time && <small>Last update {date(state.time)}</small>}</section>; })}</div></>; }
