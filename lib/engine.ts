@@ -1,10 +1,8 @@
-import { env } from 'cloudflare:workers';
 import { initialDocuments, initialChallenges, defaultSettings, freshState, fragments, timeline } from './story';
 import { prepareArchiveState } from './archive-access';
-export const db = () => { if (!env.DB)
-    throw new Error('Archive database unavailable.'); return env.DB; };
-export const bucket = () => { if (!env.BUCKET)
-    throw new Error('Media archive unavailable.'); return env.BUCKET; };
+import { db as postgresDb } from './postgres';
+export const db = postgresDb;
+export function parseJson(value: any) { return typeof value === 'string' ? JSON.parse(value) : value; }
 export const stmt = (sql: string, ...args: any[]) => db().prepare(sql).bind(...args);
 export const one = (sql: string, ...args: any[]) => stmt(sql, ...args).first<any>();
 export const all = async (sql: string, ...args: any[]) => (await stmt(sql, ...args).all<any>()).results;
@@ -39,20 +37,70 @@ export async function requireSession(req: Request, admin = false) { const s = aw
     fail('Investigator session expired. Sign in again.', 401); if (admin && s.role !== 'admin')
     fail('CONTROL ROOM ACCESS DENIED.', 403); return s; }
 export async function settings() { const row = await one('SELECT * FROM settings WHERE id=?', 'event'); if (!row)
-    fail('STATION NOT COMMISSIONED. Ask event control to initialise the archive.', 503); const value = JSON.parse(row.value); if (value.status === 'SCHEDULED' && Date.now() >= value.startedAt)
+    fail('STATION NOT COMMISSIONED. Ask event control to initialise the archive.', 503); const value = parseJson(row.value); if (value.status === 'SCHEDULED' && Date.now() >= value.startedAt)
     value.status = 'RUNNING'; return { ...row, value }; }
 export function remaining(c: any) { return Math.max(0, c.status === 'RUNNING' ? Math.ceil((c.endsAt - Date.now()) / 1000) : c.remaining); }
 export function running(c: any) { if (c.status !== 'RUNNING' || remaining(c) <= 0)
     fail('TRANSMISSION WINDOW CLOSED. Progress is preserved; new changes are paused.', 409); }
+export async function hydrateArchiveState(state: any, teamId: string) {
+    const next = prepareArchiveState(parseJson(state));
+    delete next.unlocks;
+    delete next.archiveApprovals;
+    next.unlocks = {};
+    next.archiveApprovals = {};
+    const rows = await all('SELECT document_id,approved_at,unlocked_at FROM file_unlocks WHERE team_id=?', teamId);
+    for (const row of rows) {
+        if (row.approved_at) next.archiveApprovals[row.document_id] = row.approved_at;
+        if (row.unlocked_at) next.unlocks[row.document_id] = row.unlocked_at;
+    }
+    return next;
+}
 export async function team(id: string) { const t = await one('SELECT * FROM teams WHERE id=?', id); if (!t)
-    fail('Team not found.', 404); t.state = prepareArchiveState(JSON.parse(t.state)); return t; }
-export function logStatement(actor: string, teamId: string | null, action: string, detail = '') { return stmt('INSERT INTO activity(id,team_id,actor,action,detail,created_at) VALUES(?,?,?,?,?,?)', uuid(), teamId, actor, action, detail, Date.now()); }
-export async function saveTeam(t: any, actor: string, action: string, detail = '') { const result = await db().batch([stmt('UPDATE teams SET state=?,name=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?', JSON.stringify(t.state), t.name, Date.now(), t.id, t.revision), logStatement(actor, t.id, action, detail)]); if (!result[0].meta.changes)
-    fail('State changed at another terminal. Try again.', 409); }
+    fail('Team not found.', 404); t.state = await hydrateArchiveState(t.state, id); return t; }
+export function logStatement(actor: string, teamId: string | null, action: string, detail = '') { return stmt('INSERT INTO activity(team_id,actor,action,detail) VALUES(?,?,?,?)', teamId, actor, action, detail); }
+export async function saveTeam(t: any, actor: string, action: string, detail = '', extra: any[] = []) {
+    const stored = { ...t.state };
+    delete stored.unlocks;
+    delete stored.archiveApprovals;
+    await db().transaction(async tx => {
+        const update = await tx.run(stmt('UPDATE teams SET state=?::jsonb,name=?,revision=revision+1,updated_at=now() WHERE id=? AND revision=?', JSON.stringify(stored), t.name, t.id, t.revision));
+        if (!update.meta.changes) fail('State changed at another terminal. Try again.', 409);
+        for (const operation of extra) {
+            const result = await tx.run(operation);
+            if (/file_unlocks/i.test(operation.sql) && !result.meta.changes) fail('File approval or station state changed. Retry.', 409);
+        }
+        await tx.run(logStatement(actor, t.id, action, detail));
+    });
+    t.revision += 1;
+    t.updated_at = Date.now();
+}
 export function publicTeam(t: any) { const s = t.state; return { id: t.id, code: t.code, name: t.name, updatedAt: t.updated_at, state: s, revision: t.revision }; }
 export function progress(s: any) { return Math.round((Object.values(s.challenges).filter((x: any) => x.status === 'COMPLETED').length + Object.keys(s.unlocks).length + (s.broadcast ? 2 : 0) + (s.truth ? 2 : 0)) / 20 * 100); }
+export async function leaderboardRows() {
+    const rows = await all('SELECT * FROM leaderboard_v ORDER BY rank');
+    return rows.map(row => ({
+        ...row,
+        finishedAt: 0,
+        unlock_times: Object.fromEntries(Object.entries(row.unlock_times || {}).map(([id, value]) => [id, value ? new Date(String(value)).getTime() : null])),
+    }));
+}
+export async function reserveMediaUpload(teamId: string, name: string, mime: string, size: number) {
+    const id = uuid();
+    const path = `${teamId}/${id}`;
+    const expires = Date.now() + 2 * 60 * 60 * 1000;
+    await db().transaction(async tx => {
+        const teamRow = await tx.one('SELECT state FROM teams WHERE id=? FOR UPDATE', teamId);
+        if (!teamRow) fail('Team not found.', 404);
+        if (parseJson(teamRow.state).submittedAt) fail('Media is locked after final submission. Ask a marshal to review it.', 409);
+        await tx.run(stmt('DELETE FROM media_upload_intents WHERE team_id=? AND expires<?', teamId, Date.now()));
+        const count = await tx.one('SELECT (SELECT count(*) FROM media WHERE team_id=?) + (SELECT count(*) FROM media_upload_intents WHERE team_id=? AND expires>?) AS total', teamId, teamId, Date.now());
+        if (Number(count?.total || 0) >= 12) fail('Archive holds at most 12 fragments per team. Remove one before uploading.');
+        await tx.run(stmt('INSERT INTO media_upload_intents(id,team_id,name,mime,size,storage_path,expires) VALUES(?,?,?,?,?,?,?)', id, teamId, name.slice(0, 180), mime, size, path, expires));
+    }, 'media_upload');
+    return { id, path, expires };
+}
 export async function commission() { if (await one('SELECT id FROM settings WHERE id=?', 'event'))
-    return null; const statements = [stmt('INSERT INTO settings(id,value) VALUES(?,?)', 'event', JSON.stringify(defaultSettings)), ...initialDocuments.map(d => { const { passkey, ...data } = d; return stmt('INSERT INTO documents(id,data,passkey) VALUES(?,?,?)', d.id, JSON.stringify(data), passkey); }), ...initialChallenges.map(c => stmt('INSERT INTO challenges(id,data) VALUES(?,?)', c.id, JSON.stringify(c))), logStatement('admin', null, 'COMMISSION', '8 documents and 8 stations seeded; no teams registered')]; await db().batch(statements); return []; }
+    return null; const statements = [stmt('INSERT INTO settings(id,value) VALUES(?,?::jsonb)', 'event', JSON.stringify(defaultSettings)), ...initialDocuments.map(d => { const { passkey, ...data } = d; return stmt('INSERT INTO documents(id,data,passkey) VALUES(?,?::jsonb,?)', d.id, JSON.stringify(data), passkey); }), ...initialChallenges.map(c => stmt('INSERT INTO challenges(id,data) VALUES(?,?::jsonb)', c.id, JSON.stringify(c))), logStatement('admin', null, 'COMMISSION', '8 documents and 8 stations seeded; no teams registered')]; await db().batch(statements); return []; }
 export function normalizeTeamCode(value: unknown) { let code = String(value ?? '').trim().toUpperCase().replace(/\s+/g, ' '); const numbered = code.match(/^TEAM\s*0?(\d+)$/); if (numbered) code = 'TEAM ' + String(Number(numbered[1])).padStart(2, '0'); return code; }
 export async function addTeams(input: unknown) {
     if (!Array.isArray(input) || input.length < 1 || input.length > 100) fail('Register between 1 and 100 teams at a time.');
@@ -77,21 +125,22 @@ export async function addTeams(input: unknown) {
         codes.add(code); names.add(name.toLocaleLowerCase('en-US'));
         prepared.push({ id: uuid(), code, name, access, password: await hash(access) });
     }
-    const now = Date.now();
-    const statements = prepared.flatMap(t => [stmt('INSERT INTO teams(id,code,name,password,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)', t.id, t.code, t.name, t.password, JSON.stringify(freshState()), now, now), logStatement('admin', t.id, 'TEAM REGISTERED', t.code)]);
+    const statements = prepared.flatMap(t => [stmt('INSERT INTO teams(id,code,name,password,state) VALUES(?,?,?,?,?::jsonb)', t.id, t.code, t.name, t.password, JSON.stringify(freshState())), logStatement('admin', t.id, 'TEAM REGISTERED', t.code)]);
     await db().batch(statements);
     return prepared.map(({ id, code, name, access }) => ({ id, code, name, access }));
 }
 export async function snapshot(s: any, teamId?: string) {
     const conf = (await settings()).value;
-    const docs = (await all('SELECT * FROM documents')).map(d => ({ ...JSON.parse(d.data), passkey: d.passkey }));
-    const challenges = (await all('SELECT * FROM challenges')).map(c => JSON.parse(c.data));
+    const docs = (await all('SELECT * FROM documents')).map(d => ({ ...parseJson(d.data), passkey: d.passkey }));
+    const challenges = (await all('SELECT * FROM challenges')).map(c => parseJson(c.data));
     const admin = s.role === 'admin';
     const chosen = !admin || teamId ? await team(admin ? teamId! : s.team_id) : null;
     const st = chosen?.state;
-    const list = admin || conf.leaderboard ? await all('SELECT id,code,name,state,updated_at,revision FROM teams') : [];
-    const teams = list.map(t => { t.state = prepareArchiveState(JSON.parse(t.state)); return t; });
-    const ranks = teams.map(t => ({ id: t.id, code: t.code, name: t.name, progress: progress(t.state), broadcast: t.state.broadcast, truth: t.state.truth, accuracy: t.state.accuracy, finishedAt: t.state.finishedAt, score: Math.max(0, t.state.accuracy + progress(t.state) - (conf.hintPenalty ? t.state.hints.reduce((a: number, h: any) => a + h.cost, 0) : 0)), objectives: Number(t.state.broadcast) + Number(t.state.truth) })).sort((a, b) => b.objectives - a.objectives || b.accuracy - a.accuracy || ((a.objectives === 2 && b.objectives === 2) ? a.finishedAt - b.finishedAt : b.progress - a.progress) || b.score - a.score || a.code.localeCompare(b.code));
+    const list = admin ? await all('SELECT id,code,name,state,updated_at,revision FROM teams') : [];
+    const teams = await Promise.all(list.map(async t => { t.state = await hydrateArchiveState(t.state, t.id); return t; }));
+    const ranks = admin || conf.leaderboard ? await leaderboardRows() : [];
+    const rankPosition = new Map(ranks.map((row: any, index: number) => [row.id, index]));
+    teams.sort((a: any, b: any) => (rankPosition.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rankPosition.get(b.id) ?? Number.MAX_SAFE_INTEGER));
     return {
         ending: st?.broadcast && st?.truth && ['01', '02', '03', '04'].every(id => st.unlocks[id]) ? 'Adrian Vale deliberately interrupted the broadcast and entered Room Zero. ECHO isolated the distribution buses. Their actions kept the Ghost Carrier from propagating beyond Meridian.' : undefined,
         admin, now: Date.now(),
@@ -120,6 +169,6 @@ export async function echo(st: any, q: string) {
     else if (/carrier|signal|frequency/i.test(q) && st.unlocks['02']) current = '02';
     else if (/02:13|time|ended/i.test(q) && st.unlocks['01']) current = '01';
     const source = await one('SELECT data FROM documents WHERE id=?', current);
-    return JSON.parse(source.data).echo;
+    return parseJson(source.data).echo;
 }
 export function scoreTheory(answers: string[], weights: number[]) { const tests = [/adrian\s+vale/i, /(intentional|deliberat|manual|cut|interrupt)/i, /(embed|hidden|repeat).*(signal|carrier|transmission)|(signal|carrier).*(embed|hidden|repeat)/i, /(contain|isolat).*(bus|station|broadcast|distribution|shut)|(echo).*(contain|isolat)/i, /room\s*(zero|0)/i, /(spread|propagat|relay|reproduc)/i, /(contain|isolat).*(blackout|silenc|shutdown|shut|bus)|(blackout|silenc|shutdown).*(contain|isolat)/i]; return answers.reduce((sum, a, i) => sum + (tests[i].test(a) ? weights[i] : 0), 0); }

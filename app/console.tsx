@@ -10,7 +10,16 @@ import { Switch } from '@/components/ui/switch';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { AlertDialog, AlertDialogContent, AlertDialogTitle, AlertDialogDescription, AlertDialogCancel, AlertDialogAction, AlertDialogFooter } from '@/components/ui/alert-dialog';
 import { Toaster, toast } from 'sonner';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 type Any = any;
+let browserSupabase: SupabaseClient | undefined;
+function getBrowserSupabase() {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!url || !key) return null;
+    browserSupabase ??= createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false } });
+    return browserSupabase;
+}
 const clock = (n: number) => { const v = Math.max(0, Math.floor(n)); return [Math.floor(v / 3600), Math.floor(v / 60) % 60, v % 60].map(x => String(x).padStart(2, '0')).join(':'); };
 const date = (t: number) => t ? new Date(t).toLocaleTimeString() : 'â€”';
 const pct = (s: Any) => Math.round((Object.values(s.challenges).filter((x: Any) => x.status === 'COMPLETED').length + Object.keys(s.unlocks).length + (s.broadcast ? 2 : 0) + (s.truth ? 2 : 0)) / 20 * 100);
@@ -54,8 +63,13 @@ export default function Console() {
             location.href = '/participant/case';
             return;
         }
-        setData(v);
-        setConnected(true);
+        let leaderboard = v.leaderboard || [];
+        if (v.admin || v.settings.leaderboard) {
+            const leaderboardResponse = await fetch('/api/leaderboard', { cache: 'no-store' });
+            const leaderboardResult: any = leaderboardResponse.ok ? await leaderboardResponse.json() : null;
+            leaderboard = leaderboardResult?.rows || v.leaderboard || [];
+        }
+        setData({ ...v, leaderboard });
         setError('');
     }
     catch (e: Any) {
@@ -65,11 +79,35 @@ export default function Console() {
     finally {
         setLoading(false);
     } }, [path, login, selected, admin]);
-    useEffect(() => { load(); if (login || !path)
-        return; const events = new EventSource('/api/events'); events.addEventListener('change', () => { if (!document.hidden)
-        load(); }); events.onerror = () => setConnected(false); events.onopen = () => setConnected(true); const interval = setInterval(() => { if (!document.hidden)
-        load(); }, 15000); const visibility = () => { if (!document.hidden)
-        load(); }; document.addEventListener('visibilitychange', visibility); return () => { events.close(); clearInterval(interval); document.removeEventListener('visibilitychange', visibility); }; }, [load, login, path]);
+    useEffect(() => {
+        load();
+        if (login || !path) return;
+        let channelUp = false;
+        let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+        let lastRefreshAt = 0;
+        const client = getBrowserSupabase();
+        const channel = client?.channel('meridian-event').on('broadcast', { event: 'change' }, () => {
+            if (document.hidden || refreshTimer) return;
+            const wait = Math.max(0, 1000 - (Date.now() - lastRefreshAt));
+            refreshTimer = setTimeout(() => { refreshTimer = undefined; lastRefreshAt = Date.now(); void load(); }, wait);
+        }).subscribe(status => {
+            channelUp = status === 'SUBSCRIBED';
+            setConnected(channelUp);
+            if (channelUp && !document.hidden) void load();
+        });
+        if (!client) setConnected(false);
+        const fallback = setInterval(() => { if (!document.hidden && !channelUp) void load(); }, 3000);
+        const recovery = setInterval(() => { if (!document.hidden) void load(); }, 15000);
+        const visibility = () => { if (!document.hidden) void load(); };
+        document.addEventListener('visibilitychange', visibility);
+        return () => {
+            if (refreshTimer) clearTimeout(refreshTimer);
+            clearInterval(fallback);
+            clearInterval(recovery);
+            document.removeEventListener('visibilitychange', visibility);
+            if (channel && client) void client.removeChannel(channel);
+        };
+    }, [load, login, path]);
     useEffect(() => { const tick = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(tick); }, []);
     useEffect(() => () => { audio.current?.close(); }, []);
     useEffect(() => { const mc = (document as Any).modelContext; if (!mc?.registerTool || !data)
@@ -181,21 +219,33 @@ else {
     }
     setPlaying(true);
 } }}>{playing ? 'PAUSE' : 'PLAY'} TRANSCRIPT PREVIEW</button><button className="quiet" onClick={() => { speechSynthesis.cancel(); setPlaying(false); }}>STOP</button><small>Synthesised reading of recovered text</small></div><div className="two"><Ordered items={data.fragments} ids={ids} setIds={setIds} label="01 / BROADCAST SEQUENCE"/><Ordered items={data.timeline} ids={tids} setIds={setTids} label="02 / WHAT REALLY HAPPENED?"/></div><MediaPanel data={data} act={act} load={load}/><section className="panel"><p className="eyebrow">03 / FINAL TRUTH SUBMISSION</p><div className="two">{questions.map((q, i) => <label key={q}>{i + 1}. {q}<textarea rows={3} maxLength={3000} value={answers[i]} onChange={e => setAnswers(answers.map((a, j) => i === j ? e.target.value : a))}/></label>)}</div><label>FINAL WRITTEN EXPLANATION<textarea rows={5} maxLength={10000} value={explanation} onChange={e => setExplanation(e.target.value)} placeholder="Connect the evidence. Distinguish the programme interruption from the station-wide blackout."/></label><label className="switchrow"><Switch checked={confirmed} onCheckedChange={setConfirmed}/> We confirm this is our final reconstruction of the archived warning.</label><div className="toolbar"><button className="quiet" disabled={busy} onClick={() => void act('draft', { value }).catch(() => { })}>SAVE DRAFT</button><button disabled={busy || !confirmed || answers.some(a => a.trim().length < 8) || explanation.trim().length < 80 || s.truth} onClick={() => void act('submit', { value }).catch(() => { })}>SUBMIT FINAL TRANSMISSION</button></div>{s.submittedAt && <p className="notice">Submitted {date(s.submittedAt)} / {s.truth ? 'TRUTH CONFIRMED' : 'THEORY AWAITING MARSHAL REVIEW'} / {s.accuracy} provisional points</p>}</section></>; }
-function MediaPanel({ data, act, load, admin = false }: Any) { const [progress, setProgress] = useState(-1); const [preview, setPreview] = useState<Any>(null); const [note, setNote] = useState(''); return <section className="panel"><div className="sectiontitle"><h2>{admin ? 'MEDIA CONTROL' : 'RECOVERED MEDIA'}</h2><span>{data.media.length} FRAGMENTS</span></div>{!admin && <><p>MP3, WAV, M4A, MP4, WEBM, MOV Â· up to {data.settings.maxUploadMB} MB each Â· {data.settings.requiredUploads} required {data.settings.requireApproval ? 'with marshal approval' : ''}</p><label className="uploadlabel"><Upload size={24}/> UPLOAD BROADCAST FRAGMENT<input aria-label="Choose broadcast fragment" type="file" accept=".mp3,.wav,.m4a,.mp4,.webm,.mov" disabled={progress >= 0 || !!data.team.state.submittedAt} onChange={e => { const file = e.target.files?.[0]; if (!file)
+async function uploadMedia(file: File, data: Any, load: () => Promise<void>, setProgress: (value: number) => void) {
+    if (file.size > data.settings.maxUploadMB * 1024 * 1024) { toast.error('File exceeds upload limit.'); return; }
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    const types: Record<string, string> = { mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime' };
+    if (!ext || !types[ext]) { toast.error('Use MP3, WAV, M4A, MP4, WEBM or MOV.'); return; }
+    const client = getBrowserSupabase();
+    if (!client) { toast.error('Supabase Storage is not configured.'); return; }
+    setProgress(0);
+    try {
+        const signedResponse = await fetch('/api/media', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: file.name, mime: types[ext], size: file.size }) });
+        const signed: Any = await signedResponse.json();
+        if (!signedResponse.ok) throw Error(signed.error);
+        const { error } = await client.storage.from('media').uploadToSignedUrl(signed.path, signed.token, file, { contentType: types[ext] });
+        if (error) throw error;
+        setProgress(100);
+        const finalized = await fetch('/api/media/finalize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: signed.id }) });
+        const result: Any = await finalized.json();
+        if (!finalized.ok) throw Error(result.error);
+        toast.success('FRAGMENT ARCHIVED.');
+        await load();
+    } catch (error: Any) { toast.error(error.message || 'UPLOAD FAILED. Select the file to retry.'); }
+    finally { setProgress(-1); }
+}function MediaPanel({ data, act, load, admin = false }: Any) { const [progress, setProgress] = useState(-1); const [preview, setPreview] = useState<Any>(null); const [note, setNote] = useState(''); return <section className="panel"><div className="sectiontitle"><h2>{admin ? 'MEDIA CONTROL' : 'RECOVERED MEDIA'}</h2><span>{data.media.length} FRAGMENTS</span></div>{!admin && <><p>MP3, WAV, M4A, MP4, WEBM, MOV Â· up to {data.settings.maxUploadMB} MB each Â· {data.settings.requiredUploads} required {data.settings.requireApproval ? 'with marshal approval' : ''}</p><label className="uploadlabel"><Upload size={24}/> UPLOAD BROADCAST FRAGMENT<input aria-label="Choose broadcast fragment" type="file" accept=".mp3,.wav,.m4a,.mp4,.webm,.mov" disabled={progress >= 0 || !!data.team.state.submittedAt} onChange={e => { const file = e.target.files?.[0]; if (!file)
     return; if (file.size > data.settings.maxUploadMB * 1024 * 1024) {
     toast.error('File exceeds upload limit.');
     return;
-} const xhr = new XMLHttpRequest(); xhr.open('POST', '/api/media'); setProgress(0); xhr.upload.onprogress = e => { if (e.lengthComputable)
-    setProgress(Math.round(e.loaded / e.total * 100)); }; xhr.onload = () => { setProgress(-1); try {
-    const d = JSON.parse(xhr.responseText);
-    if (xhr.status >= 400)
-        throw Error(d.error);
-    toast.success('FRAGMENT ARCHIVED.');
-    load();
-}
-catch (e: Any) {
-    toast.error(e.message);
-} }; xhr.onerror = () => { setProgress(-1); toast.error('UPLOAD FAILED. Select the file to retry.'); }; const body = new FormData(); body.append('file', file); xhr.send(body); e.target.value = ''; }}/></label>{progress >= 0 && <><Progress value={progress}/><p aria-live="polite">{progress === 100 ? 'PROCESSINGâ€¦' : 'UPLOADINGâ€¦ ' + progress + '%'}</p></>}</>}{data.media.length === 0 ? <p className="muted">NO FRAGMENTS ARCHIVED</p> : data.media.map((m: Any) => <div className="mediarow" key={m.id}><div><b>{m.name}</b><small>{admin ? (data.teams.find((t: Any) => t.id === m.team_id)?.code || '') + ' / ' : ''}{(m.size / 1048576).toFixed(1)} MB / {m.status}</small>{m.note && <p>{m.note}</p>}</div><div className="toolbar"><button className="quiet" onClick={() => { setPreview(m); setNote(m.note); }}>PREVIEW</button><a href={'/api/media?id=' + m.id + '&download=1'}>DOWNLOAD</a>{!admin && !data.team.state.submittedAt && <button className="quiet" onClick={async () => { const r = await fetch('/api/media?id=' + m.id, { method: 'DELETE' }); if (!r.ok) {
+} if (file) void uploadMedia(file, data, load, setProgress); e.target.value = ''; }}/></label>{progress >= 0 && <><Progress value={progress}/><p aria-live="polite">{progress === 100 ? 'PROCESSINGâ€¦' : 'UPLOADINGâ€¦ ' + progress + '%'}</p></>}</>}{data.media.length === 0 ? <p className="muted">NO FRAGMENTS ARCHIVED</p> : data.media.map((m: Any) => <div className="mediarow" key={m.id}><div><b>{m.name}</b><small>{admin ? (data.teams.find((t: Any) => t.id === m.team_id)?.code || '') + ' / ' : ''}{(m.size / 1048576).toFixed(1)} MB / {m.status}</small>{m.note && <p>{m.note}</p>}</div><div className="toolbar"><button className="quiet" onClick={() => { setPreview(m); setNote(m.note); }}>PREVIEW</button><a href={'/api/media?id=' + m.id + '&download=1'}>DOWNLOAD</a>{!admin && !data.team.state.submittedAt && <button className="quiet" onClick={async () => { const r = await fetch('/api/media?id=' + m.id, { method: 'DELETE' }); if (!r.ok) {
     toast.error(((await r.json()) as any).error);
     return;
 } await load(); }}>REMOVE</button>}</div></div>)}<Dialog open={!!preview} onOpenChange={v => { if (!v)
@@ -206,7 +256,30 @@ catch (e: Any) {
 catch { } }}>{status}</button>)}</div></>}</DialogContent></Dialog></section>; }
 function Team({ data, act }: Any) { const s = data.team.state; const [members, setMembers] = useState(s.members.join('\n')); return <div className="two"><section className="panel"><p className="eyebrow">{data.team.code}</p><h2>{data.team.name}</h2><Progress value={pct(s)}/><p>{pct(s)}% overall progress</p><p>{Object.values(s.challenges).filter((x: Any) => x.status === 'COMPLETED').length}/8 challenges Â· {Object.keys(s.unlocks).length}/8 files Â· {s.hints.length} hints</p><p>Broadcast: {s.broadcast ? 'COMPLETE' : 'INCOMPLETE'}<br />Truth: {s.truth ? 'CONFIRMED' : 'UNCONFIRMED'}</p><p>Current objective: {s.broadcast ? 'Have your deduction reviewed.' : 'Recover records and reconstruct the warning.'}</p></section><form className="panel" onSubmit={e => { e.preventDefault(); void act('members', { members: members.split('\n') }).catch(() => { }); }}><label>TEAM MEMBERS / ONE PER LINE<textarea rows={7} value={members} onChange={e => setMembers(e.target.value)}/></label><button>SAVE MEMBERS</button></form></div>; }
 function ActivityFeed({ items, compact = false }: Any) { const [query, setQuery] = useState(''); return <section className="panel"><h3>{compact ? 'INVESTIGATION LOG' : 'LIVE ACTIVITY FEED'}</h3>{!compact && <label>SEARCH ACTIVITY<input value={query} onChange={e => setQuery(e.target.value)} placeholder="Team, action or detail"/></label>}<div className="feed">{items.filter((i: Any) => JSON.stringify(i).toLowerCase().includes(query.toLowerCase())).slice(0, compact ? 8 : 150).map((i: Any) => <div className="feedrow" key={i.id}><time>{date(i.created_at)}</time><div><b>{i.actor} / {i.action}</b><p>{i.detail}</p></div></div>)}{!items.length && <p>No activity recorded yet.</p>}</div></section>; }
-function Leaderboard({ data }: Any) { return <Table><TableHeader><TableRow>{['RANK', 'TEAM', 'PROGRESS', 'BROADCAST', 'TRUTH', 'ACCURACY', 'TIME', 'SCORE'].map(c => <TableHead key={c}>{c}</TableHead>)}</TableRow></TableHeader><TableBody>{data.leaderboard.map((t: Any, i: number) => <TableRow key={t.id}><TableCell>{i + 1}</TableCell><TableCell>{t.name}</TableCell><TableCell>{t.progress}%</TableCell><TableCell>{t.broadcast ? 'âœ“' : 'â€”'}</TableCell><TableCell>{t.truth ? 'âœ“' : 'â€”'}</TableCell><TableCell>{t.accuracy}</TableCell><TableCell>{t.finishedAt && data.settings.startedAt ? clock((t.finishedAt - data.settings.startedAt) / 1000) : 'â€”'}</TableCell><TableCell>{t.score}</TableCell></TableRow>)}</TableBody></Table>; }
+const elapsedLabel = (milliseconds: number) => { const total = Math.max(0, Math.floor(milliseconds / 1000)); const hours = Math.floor(total / 3600); const minutes = Math.floor(total / 60) % 60; const seconds = total % 60; return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}` : `${minutes}:${String(seconds).padStart(2, '0')}`; };
+function Leaderboard({ data }: Any) {
+    const rows = data.leaderboard || [];
+    const eventStart = Number(data.settings?.startedAt || 0);
+    const fastestId = rows.find((row: Any) => Number(row.files_unlocked) > 0)?.id;
+    const viewerId = data.admin ? undefined : data.team?.id;
+    if (!rows.length) return <p className="muted">NO TEAMS REGISTERED</p>;
+    return <>
+        {!rows.some((row: Any) => Number(row.files_unlocked) > 0) && <p className="muted">NO FILES UNLOCKED YET. ALL REGISTERED TEAMS ARE SHOWN BELOW.</p>}
+        <Table><TableHeader><TableRow>{['RANK', 'TEAM / ID', 'FILES UNLOCKED', 'LATEST UNLOCK', 'PROGRESS', 'BROADCAST', 'TRUTH', 'ACCURACY', 'SCORE'].map(c => <TableHead key={c}>{c}</TableHead>)}</TableRow></TableHeader><TableBody>{rows.map((t: Any) => {
+            const unlocked = Number(t.files_unlocked) || 0;
+            const latest = t.last_unlock_at ? elapsedLabel(Number(t.last_unlock_at) - eventStart) : '—';
+            return <TableRow key={t.id} data-selected={t.id === viewerId || t.id === fastestId}>
+                <TableCell>{t.rank}</TableCell><TableCell>{t.name}<small>{t.code}</small></TableCell>
+                <TableCell>{unlocked} / 8<details><summary>FILE TIMES</summary><div className="matrix">{Array.from({ length: 8 }, (_, index) => {
+                    const id = String(index).padStart(2, '0');
+                    const at = t.unlock_times?.[id];
+                    return <div className="matrixitem" key={id}><b>FILE {id}</b><small>{at && eventStart ? `${elapsedLabel(Number(at) - eventStart)} · ${new Date(Number(at)).toLocaleTimeString()}` : 'LOCKED'}</small></div>;
+                })}</div></details></TableCell>
+                <TableCell>{latest}</TableCell><TableCell>{t.progress}%</TableCell><TableCell>{t.broadcast ? 'âœ“' : 'â€”'}</TableCell><TableCell>{t.truth ? 'âœ“' : 'â€”'}</TableCell><TableCell>{t.accuracy}</TableCell><TableCell>{t.score}</TableCell>
+            </TableRow>;
+        })}</TableBody></Table>
+    </>;
+}
 function download(name: string, text: string) { const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' })); const a = document.createElement('a'); a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url); }
 function parseCsv(source: string) { return source.split(/\r?\n/).map(line => { const out: string[] = []; let value = '', quoted = false; for (let i = 0; i < line.length; i++) { const ch = line[i]; if (ch === '"' && line[i + 1] === '"' && quoted) { value += '"'; i++; } else if (ch === '"') quoted = !quoted; else if (ch === ',' && !quoted) { out.push(value.trim()); value = ''; } else value += ch; } out.push(value.trim()); return out; }).filter(row => row.some(Boolean)); }
 function RegistrationPanel({ data, act, busy, setCreds }: Any) { const [code, setCode] = useState(''); const [name, setName] = useState(''); const [access, setAccess] = useState(''); const [csv, setCsv] = useState(''); const rows = parseCsv(csv); const headers = rows[0]?.map(x => x.toLowerCase()); const header = !!headers?.some(x => ['id', 'code', 'team id'].includes(x)) && headers.some(x => ['name', 'team name'].includes(x)); const src = header ? rows.slice(1) : rows; const colCode = header ? Math.max(0, headers.findIndex(x => ['id', 'code', 'team id'].includes(x))) : 0; const colName = header ? headers.findIndex(x => ['name', 'team name'].includes(x)) : 1; const colAccess = header ? headers.findIndex(x => ['access code', 'accesscode', 'password'].includes(x)) : 2; const teams = src.map(r => ({ code: r[colCode] || '', name: r[colName] || '', accessCode: colAccess < 0 ? '' : r[colAccess] || '' })); const allTeams = data.teams; const normalize = (v: string) => { const code = v.trim().toUpperCase().replace(/\s+/g, ' '); const n = code.match(/^TEAM\s*0?(\d+)$/); return n ? 'TEAM ' + String(Number(n[1])).padStart(2, '0') : code; }; const errors = teams.flatMap((t, i) => { const e: string[] = []; if (!t.name || t.name.length > 80) e.push('Row ' + (i + 1) + ': name required (up to 80 characters).'); if (t.code && !/^[A-Z0-9][A-Z0-9 _-]{1,31}$/.test(normalize(t.code))) e.push('Row ' + (i + 1) + ': ID must be 2?32 characters using letters, numbers, spaces, hyphens or underscores.'); if (t.code && allTeams.some((x: Any) => normalize(x.code) === normalize(t.code))) e.push('Row ' + (i + 1) + ': ID already registered.'); if (t.name && allTeams.some((x: Any) => x.name.toLowerCase() === t.name.toLowerCase())) e.push('Row ' + (i + 1) + ': name already registered.'); if (t.accessCode.trim() && (t.accessCode.trim().length < 8 || t.accessCode.trim().length > 64)) e.push('Row ' + (i + 1) + ': access code must be 8?64 characters.'); return e; }); const tooMany = teams.length > 100; const duplicate = teams.some((t, i) => teams.slice(0, i).some(x => (t.code && normalize(x.code) === normalize(t.code)) || (t.name && x.name.toLowerCase() === t.name.toLowerCase()))); const singleErrors = (!name.trim() ? 'Enter a team name.' : name.trim().length > 80 ? 'Team name must be 80 characters or fewer.' : allTeams.some((x: Any) => x.name.toLowerCase() === name.trim().toLowerCase()) ? 'A team with that name already exists.' : code.trim() && !/^[A-Z0-9][A-Z0-9 _-]{1,31}$/.test(normalize(code)) ? 'Team ID must be 2?32 characters using letters, numbers, spaces, hyphens or underscores.' : code.trim() && allTeams.some((x: Any) => normalize(x.code) === normalize(code)) ? 'That team ID already exists.' : access.trim() && (access.trim().length < 8 || access.trim().length > 64) ? 'Access code must be 8?64 characters.' : ''); const register = async (items: Any[]) => { try { const result = await act('admin.addTeams', { teams: items }); setCreds(result.credentials); setCode(''); setName(''); setAccess(''); setCsv(''); } catch {} }; return <section className="panel"><h2>REGISTER TEAMS</h2><p>Leave the ID or access code blank to generate it. New access codes appear once after registration.</p><form className="two" onSubmit={e => { e.preventDefault(); if (!singleErrors) void register([{ code, name, accessCode: access }]); }}><label>TEAM ID<input value={code} onChange={e => setCode(e.target.value)} placeholder="Generated if blank" maxLength={32}/></label><label>TEAM NAME<input value={name} onChange={e => setName(e.target.value)} maxLength={80} required/></label><label>ACCESS CODE<input type="password" value={access} onChange={e => setAccess(e.target.value)} minLength={access ? 8 : undefined} maxLength={64} placeholder="Generated if blank"/></label><button disabled={busy || !!singleErrors}>REGISTER TEAM</button></form>{singleErrors && name && <p className="error">{singleErrors}</p>}<hr/><label>BULK CSV / ID, NAME, ACCESS CODE (HEADER OPTIONAL)<textarea rows={5} value={csv} onChange={e => setCsv(e.target.value)} placeholder={'TEAM 01,North Station,optional-code\nTEAM 02,South Station,'}/></label><p>{teams.length} teams in preview{errors.length ? ' / ' + errors.length + ' validation errors' : ' / ready to register'}</p>{(tooMany ? ['Import no more than 100 teams at a time.'] : duplicate ? ['Duplicate IDs or names in this file.'] : errors).map((x: string) => <p className="error" key={x}>{x}</p>)}<button disabled={busy || !teams.length || errors.length > 0 || duplicate || tooMany} onClick={() => void register(teams)}>REGISTER {teams.length} TEAMS</button>{!allTeams.length && <p className="notice">NO TEAMS REGISTERED YET. Commissioning prepared the archive; register the roster here.</p>}</section>; }
