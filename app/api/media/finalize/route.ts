@@ -11,7 +11,9 @@ function checkOrigin(req: Request) {
   let host = '';
   try { host = new URL(origin).host.toLowerCase(); } catch { E.fail('Origin rejected.', 403); }
   const expected = (req.headers.get('x-forwarded-host') || req.headers.get('host') || new URL(req.url).host).split(',')[0].trim().toLowerCase();
-  if (host !== expected && host !== process.env.VERCEL_URL?.toLowerCase()) E.fail('Origin rejected.', 403);
+  let netlifyHost = '';
+  try { if (process.env.URL) netlifyHost = new URL(process.env.URL).host.toLowerCase(); } catch {}
+  if (host !== expected && host !== process.env.VERCEL_URL?.toLowerCase() && (!netlifyHost || host !== netlifyHost)) E.fail('Origin rejected.', 403);
 }
 
 function hasSignature(mime: string, bytes: Uint8Array) {
