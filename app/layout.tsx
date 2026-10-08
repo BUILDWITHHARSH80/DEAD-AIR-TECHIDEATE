@@ -3,7 +3,7 @@ import "./globals.css";
 import "./ui-enhancements.css";
 
 export const metadata: Metadata = {
-  title: "DEAD AIR â€¢ Radio Meridian",
+  title: "DEAD AIR • Radio Meridian",
   description: "Recover the broadcast. Reveal the truth.",
   icons: {
     icon: "/favicon.svg",

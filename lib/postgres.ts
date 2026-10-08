@@ -99,9 +99,17 @@ const globalDb = globalThis as typeof globalThis & { __meridianPostgres?: Return
 
 export function db() {
   const url = process.env.SUPABASE_DB_URL;
-  if (!url) throw new Error('SUPABASE_DB_URL is not configured.');
+  if (!url) throw Object.assign(new Error('SUPABASE_DB_URL is not configured in server environment.'), { status: 503 });
   if (!globalDb.__meridianPostgres) {
-    globalDb.__meridianPostgres = postgres(url, { prepare: false, max: 3, idle_timeout: 20, connect_timeout: 10 });
+    const isLocal = url.includes('localhost') || url.includes('127.0.0.1');
+    const ssl = isLocal ? false : (url.includes('sslmode=disable') ? false : 'require');
+    globalDb.__meridianPostgres = postgres(url, {
+      prepare: false,
+      max: 3,
+      idle_timeout: 20,
+      connect_timeout: 10,
+      ssl,
+    });
     globalDb.__meridianDb = createDb(globalDb.__meridianPostgres);
   }
   return globalDb.__meridianDb!;

@@ -5,7 +5,20 @@ import { mediaStorage } from '@/lib/supabase-admin';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 const json = (v: any, status = 200, headers: any = {}) => Response.json(v, { status, headers: { 'Cache-Control': 'no-store', ...headers } });
-const error = (e: any) => { console.error('Meridian request failed', e.status || 500); return json({ error: e.status ? e.message : 'ARCHIVE CONNECTION INTERRUPTED. Your saved progress is preserved.' }, e.status || 503); };
+const error = (e: any) => {
+    console.error('Meridian request failed', e.status || 500, e?.message || e);
+    let message = e.status ? e.message : 'ARCHIVE CONNECTION INTERRUPTED. Your saved progress is preserved.';
+    if (!e.status) {
+        if (e?.code === '42P01') {
+            message = 'Database schema not initialized. Apply migrations in supabase/migrations to create meridian tables.';
+        } else if (e?.code === '28P01' || e?.code === '28000') {
+            message = 'Database authentication failed. Check SUPABASE_DB_URL credentials.';
+        } else if (e?.code === 'ECONNREFUSED' || e?.code === 'ENOTFOUND') {
+            message = 'Cannot connect to database server. Check SUPABASE_DB_URL.';
+        }
+    }
+    return json({ error: message }, e.status || 503);
+};
 function checkOrigin(req: Request) {
     const origin = req.headers.get('origin');
     if (!origin) return;
@@ -13,7 +26,9 @@ function checkOrigin(req: Request) {
     try { originHost = new URL(origin).host.toLowerCase(); } catch { E.fail('Origin rejected.', 403); }
     const requestHost = (req.headers.get('x-forwarded-host') || req.headers.get('host') || new URL(req.url).host).split(',')[0].trim().toLowerCase();
     const vercelHost = process.env.VERCEL_URL?.toLowerCase();
-    if (originHost !== requestHost && originHost !== vercelHost) E.fail('Origin rejected.', 403);
+    let netlifyHost = '';
+    try { if (process.env.URL) netlifyHost = new URL(process.env.URL).host.toLowerCase(); } catch {}
+    if (originHost !== requestHost && originHost !== vercelHost && (!netlifyHost || originHost !== netlifyHost)) E.fail('Origin rejected.', 403);
 }
 function secureRequest(req: Request) { return req.headers.get('x-forwarded-proto')?.split(',')[0].trim() === 'https' || new URL(req.url).protocol === 'https:'; }
 export async function GET(req: Request) { try {
