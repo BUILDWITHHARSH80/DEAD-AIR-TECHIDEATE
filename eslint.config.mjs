@@ -22,6 +22,29 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
   ]),
   // Frontend files rule (added upstream)
+<<<<<<< Updated upstream
+=======
+  {
+    files: ["frontend/**/*.{ts,tsx}"],
+    rules: {
+      "next/next/no-html-link-for-pages": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
+  // Backend files rule (added upstream)
+  {
+    files: ["backend/**/*.{ts,tsx}"],
+    rules: {
+      "next/next/no-html-link-for-pages": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
+  // Stashed changes – shadcn UI and mobile hook
+>>>>>>> Stashed changes
   {
     files: ["frontend/**/*.{ts,tsx}"],
     rules: {

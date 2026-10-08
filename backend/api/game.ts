@@ -42,8 +42,13 @@ export async function POST(req: Request) {
                 const password = adminPassword();
                 if (!password)
                     E.fail('Control room credentials have not been configured.', 503);
+<<<<<<< Updated upstream
                 const supplied = String(b.password || '');
                 if (String(b.username) !== 'control' || supplied !== password)
+=======
+                const supplied = await E.digest(String(b.password || ""));
+                if (String(b.username) !== "control" || supplied !== await E.digest(password))
+>>>>>>> Stashed changes
                     E.fail('ACCESS DENIED. Check your control room credentials.', 401);
                 role = 'admin';
             }
