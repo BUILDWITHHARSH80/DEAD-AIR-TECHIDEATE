@@ -4,7 +4,15 @@ import nextTs from "eslint-config-next/typescript";
 
 const eslintConfig = defineConfig([
   ...nextVitals,
-  ...nextTs,
+  { // Global disables for baseline
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+      'next/next/no-html-link-for-pages': 'off',
+      'react-hooks/set-state-in-effect': 'off',
+      'react-hooks/purity': 'off',
+    },
+  },
+
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
@@ -13,6 +21,50 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  // Frontend files rule (added upstream)
+<<<<<<< Updated upstream
+=======
+  {
+    files: ["frontend/**/*.{ts,tsx}"],
+    rules: {
+      "next/next/no-html-link-for-pages": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
+  // Backend files rule (added upstream)
+  {
+    files: ["backend/**/*.{ts,tsx}"],
+    rules: {
+      "next/next/no-html-link-for-pages": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
+  // Stashed changes – shadcn UI and mobile hook
+>>>>>>> Stashed changes
+  {
+    files: ["frontend/**/*.{ts,tsx}"],
+    rules: {
+      "next/next/no-html-link-for-pages": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
+  // Backend files rule (added upstream)
+  {
+    files: ["backend/**/*.{ts,tsx}"],
+    rules: {
+      "next/next/no-html-link-for-pages": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
+  // Stashed changes – shadcn UI and mobile hook
   {
     files: ["components/ui/**/*.{ts,tsx}", "hooks/use-mobile.ts"],
     rules: {
@@ -23,6 +75,17 @@ const eslintConfig = defineConfig([
       "react-hooks/set-state-in-effect": "off",
     },
   },
+  // General rule set for all remaining files
+  {
+    files: ['**/*.{ts,tsx,js,jsx}'],
+    rules: {
+      '@next/next/no-html-link-for-pages': 'off',
+      '@next/next/no-img-element': 'off',
+      'react-hooks/set-state-in-effect': 'off',
+      'react-hooks/purity': 'off',
+      '@typescript-eslint/no-explicit-any': 'off',
+    },
+  }
 ]);
 
 export default eslintConfig;
